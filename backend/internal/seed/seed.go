@@ -2,6 +2,7 @@ package seed
 
 import (
 	"database/sql"
+	"encoding/base64"
 	"fmt"
 	"time"
 
@@ -70,6 +71,7 @@ func Run(d *sql.DB) error {
 	g2 := mkUser("13900000002", "李华（进阶）", "guest", 178, 75, 43.5, 59, "intermediate")
 	g3 := mkUser("13900000003", "王芳（夜场初学者）", "guest", 162, 52, 38.0, 55, "beginner")
 	g4 := mkUser("13900000004", "刘团队-队长", "guest", 180, 88, 45.0, 60, "advanced")
+	g5 := mkUser("13900000007", "赵雪（日场初学者）", "guest", 158, 50, 37.5, 54, "beginner")
 	mkUser("13900000005", "团队成员-小钱", "guest", 155, 48, 37.0, 54, "beginner")
 	mkUser("13900000006", "团队成员-小孙", "guest", 168, 60, 40.0, 56, "beginner")
 
@@ -285,6 +287,76 @@ func Run(d *sql.DB) error {
 	tx.Exec(`INSERT INTO queue_tickets(rental_id, queue_type, ticket_no)
 		VALUES ($1,'return_night','N001')`, rC)
 
+	// ---------- 示例订单 D：日场归还发现板刃缺口，进入板刃损伤鉴定 ----------
+	// 证据：出库照片（刃口完整）、课程区域摔倒记录、游客说明、归还照片（缺口）
+	photoOut := svgPhoto("出库时板刃完整", "#0f766e")
+	photoReturn := svgPhoto("归还时左板刃缺口", "#b91c1c")
+	var rD int64
+	tx.QueryRow(`INSERT INTO rentals
+		(code, guest_id, course_id, ticket_no, session_type, status,
+		 deposit_total, fee_total, premium_total, night_return, pickup_at,
+		 return_due_at, returned_at)
+		VALUES ('R-DEMO-D',$1,$2,'T20260104','day','return_pending',
+		 (1500+500+300+150),(300+100+60+40),30, FALSE, now()-interval '4 hour', now()+interval '4 hour', NULL)
+		RETURNING id`, g5, dayCourse).Scan(&rD)
+	addLines(tx, rD, []lineSpec{
+		{"ski", "SKI135", "135cm", 300, 1500},
+		{"boot", "BOOT37H", "EU37.5", 100, 500},
+		{"helmet", "HELMS", "S", 60, 300},
+		{"pole", "POLE110", "110cm", 40, 150},
+	}, "out")
+	tx.Exec(`INSERT INTO insurance_policies(rental_id, product_id, premium)
+		SELECT $1,id,30 FROM insurance_products WHERE name='安心险'`, rD)
+	tx.Exec(`INSERT INTO deposit_transactions(rental_id, type, amount, note, created_by)
+		VALUES ($1,'hold',2450,'出库冻结押金',$2)`, rD, g5)
+	assignItems(tx, rD)
+
+	var skiRID, skiItemD int64
+	tx.QueryRow(`SELECT ri.id, ri.item_id FROM rental_items ri
+		WHERE ri.rental_id=$1 AND ri.equipment_type='ski'`, rD).Scan(&skiRID, &skiItemD)
+	// 雪板出库照片（刃口完整，鉴定对比基准）
+	tx.Exec(`UPDATE rental_items SET checkout_photos=$2::jsonb WHERE id=$1`,
+		skiRID, fmt.Sprintf(`["%s"]`, photoOut))
+	// 课程区域摔倒记录（教练登记 + 游客自报各一条）
+	tx.Exec(`INSERT INTO fall_records
+		(rental_id, rental_item_id, guest_id, course_area, happened_at, description, source, recorded_by)
+		VALUES ($1,$2,$3,'魔毯区',now()-interval '3 hour 20 min',
+		 '魔毯下板时侧摔一次，雪板磕到防护垫边缘','coach',$4)`,
+		rD, skiRID, g5, coachID)
+	tx.Exec(`INSERT INTO fall_records
+		(rental_id, rental_item_id, guest_id, course_area, happened_at, description, source, recorded_by)
+		VALUES ($1,$2,$3,'初级道顶部',now()-interval '1 hour 40 min',
+		 '下缆车时没站稳，板子磕到雪面，当时没注意刃口','guest',$3)`,
+		rD, skiRID, g5)
+	// 其他三件已完好归还
+	tx.Exec(`UPDATE rental_items SET status='returned_ok', returned_at=now()
+		WHERE rental_id=$1 AND equipment_type<>'ski'`, rD)
+	tx.Exec(`UPDATE equipment_items SET status='available', current_rental_item_id=NULL
+		WHERE id IN (SELECT item_id FROM rental_items WHERE rental_id=$1 AND equipment_type<>'ski')`, rD)
+	// 雪板暂扣：鉴定中，暂停出租
+	tx.Exec(`UPDATE equipment_items SET status='inspection', current_rental_item_id=NULL,
+		suspended_at=now()-interval '12 min' WHERE id=$1`, skiItemD)
+	tx.Exec(`UPDATE rental_items SET status='edge_appraisal' WHERE id=$1`, skiRID)
+	tx.Exec(`INSERT INTO edge_appraisals
+		(rental_id, rental_item_id, item_id, status, checkout_photos, fall_snapshot, course_areas,
+		 guest_statement, return_photos, return_note, severity)
+		SELECT $1,$2,$3,'pending',$4::jsonb,
+		 COALESCE((SELECT json_agg(json_build_object(
+		   'course_area',course_area,'happened_at',to_char(happened_at,'MM-DD HH24:MI'),
+		   'description',description,'source',source))::jsonb FROM fall_records WHERE rental_id=$1),'[]'::jsonb),
+		 '魔毯区、初级道顶部',
+		 '我全程按教练教学滑行，摔倒也是在教学区域，缺口应该不是我造成的，请对比出库照片。',
+		 $5::jsonb,'归还柜台目检发现左板刃有约 2mm 缺口，转维修间鉴定','medium'`,
+		rD, skiRID, skiItemD,
+		fmt.Sprintf(`["%s"]`, photoOut), fmt.Sprintf(`["%s"]`, photoReturn))
+	tx.Exec(`INSERT INTO queue_tickets(rental_id, queue_type, ticket_no)
+		VALUES ($1,'return_day','D001')`, rD)
+
+	// B/C 单补出库照片，方便演示对比
+	tx.Exec(`UPDATE rental_items SET checkout_photos=$1::jsonb
+		WHERE rental_id IN (SELECT id FROM rentals WHERE code IN ('R-DEMO-B','R-DEMO-C'))`,
+		fmt.Sprintf(`["%s"]`, svgPhoto("出库时板刃完整", "#0f766e")))
+
 	if err := tx.Commit(); err != nil {
 		return err
 	}
@@ -328,6 +400,16 @@ func addLines(tx *sql.Tx, rentalID int64, lines []lineSpec, status string) {
 			VALUES ($1,$2,$3,$4,'按身高体重脚码与水平生成建议',$5,$6,$7)`,
 			rentalID, l.etype, modelID, l.size, l.fee, l.deposit, status)
 	}
+}
+
+// svgPhoto 生成内联 SVG 示意图（无需外部文件即可演示出库/归还照片对比）
+func svgPhoto(label, color string) string {
+	svg := fmt.Sprintf(`<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180">
+<rect width="320" height="180" fill="#f1f5f9"/>
+<rect x="18" y="40" width="284" height="100" rx="10" fill="%s"/>
+<text x="160" y="98" font-size="20" text-anchor="middle" fill="white" font-family="sans-serif">%s</text>
+</svg>`, color, label)
+	return "data:image/svg+xml;base64," + base64.StdEncoding.EncodeToString([]byte(svg))
 }
 
 // assignItems 为已存在的租赁明细各分配一件该型号的可用雪具并更新状态

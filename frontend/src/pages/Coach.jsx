@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react'
-import { api, TYPE_LABEL } from '../api.js'
-import { Badge, Loading, useToast } from '../components/ui.jsx'
+import { api, TYPE_LABEL, COURSE_AREAS } from '../api.js'
+import { Badge, Field, Loading, Modal, useToast } from '../components/ui.jsx'
 
 export default function CoachPage() {
   const [courses, setCourses] = useState(null)
@@ -52,6 +52,7 @@ export default function CoachPage() {
                           i.type === 'boot' ? '雪鞋不合脚，建议换半码' : '雪板长度不适合当前水平，建议换板')}>
                           ✗ 不合规
                         </button>
+                        {i.type === 'ski' && <FallButton rentalId={rr.id} itemId={i.ri_id} onDone={load} />}
                       </div>
                     </td>
                   </tr>
@@ -67,4 +68,33 @@ export default function CoachPage() {
       {courses.length === 0 && <div className="empty">近期没有安排课程</div>}
     </div>
   )
+}
+
+// 教练登记学员摔倒（课程区域留档，板刃鉴定时作为证据）
+function FallButton({ rentalId, itemId, onDone }) {
+  const [open, setOpen] = useState(false)
+  const [area, setArea] = useState(COURSE_AREAS[0])
+  const [desc, setDesc] = useState('')
+  const toast = useToast()
+  const submit = async () => {
+    try {
+      const d = await api('POST', '/coach/fall-record', {
+        rental_id: rentalId, rental_item_id: itemId, course_area: area, description: desc
+      })
+      toast(d.message); setOpen(false); setDesc(''); onDone()
+    } catch (e) { toast(e.message, 'error') }
+  }
+  return <>
+    <button className="btn sm ghost" onClick={() => setOpen(true)}>🤕 登记摔倒</button>
+    {open && <Modal title="登记学员摔倒（课程区域留档）" onClose={() => setOpen(false)}>
+      <Field label="课程区域">
+        <select value={area} onChange={e => setArea(e.target.value)}>
+          {COURSE_AREAS.map(a => <option key={a}>{a}</option>)}
+        </select>
+      </Field>
+      <Field label="摔倒描述"><textarea rows={3} value={desc} onChange={e => setDesc(e.target.value)} placeholder="摔倒经过、是否磕碰到雪板/护具" /></Field>
+      <div className="modal-foot"><button className="btn ghost" onClick={() => setOpen(false)}>取消</button>
+        <button className="btn" onClick={submit}>登记</button></div>
+    </Modal>}
+  </>
 }

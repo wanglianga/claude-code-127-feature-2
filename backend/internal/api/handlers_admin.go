@@ -107,6 +107,9 @@ func (s *Server) equipmentTrace(w http.ResponseWriter, r *http.Request) {
 	args := []interface{}{}
 	q := `SELECT COALESCE(json_agg(t ORDER BY t.id), '[]') FROM (
 		SELECT i.id, i.qr_code, i.serial_no, i.status, i.condition_note, i.rental_count,
+		       to_char(i.suspended_at,'YYYY-MM-DD HH24:MI') AS suspended_at,
+		       to_char(i.resumed_at,'YYYY-MM-DD HH24:MI') AS resumed_at,
+		       EXTRACT(EPOCH FROM (COALESCE(i.resumed_at, now()) - i.suspended_at))::bigint AS suspended_seconds,
 		       m.brand, m.name, m.size_label, m.type AS equipment_type,
 		       rr.id AS rental_id, rr.code AS rental_code,
 		       u.name AS holder_name, u.phone AS holder_phone,
@@ -116,7 +119,7 @@ func (s *Server) equipmentTrace(w http.ResponseWriter, r *http.Request) {
 		         WHEN 'available' THEN '可出租'
 		         WHEN 'reserved' THEN '已预约待取'
 		         WHEN 'out' THEN '在游客手中'
-		         WHEN 'inspection' THEN '回收检查中'
+		         WHEN 'inspection' THEN '板刃鉴定/回收检查中，暂停出租'
 		         WHEN 'repair' THEN '维修中，暂不可租'
 		         WHEN 'retired' THEN '已报废' END AS status_label,
 		       (i.status='available') AS rentable

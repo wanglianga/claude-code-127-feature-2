@@ -118,13 +118,18 @@ function Trace() {
       <p className="muted small">每套雪具现在在谁手里、是否关联课程、是否适配（课前确认）、是否可继续出租，一屏可查。</p>
       {!list ? <Loading /> : <div className="card" style={{ padding: 0 }}>
         <div className="table-wrap"><table>
-          <thead><tr><th>二维码</th><th>类型</th><th>品牌型号尺码</th><th>状态</th><th>持有人</th><th>课程/场次</th><th>课前适配</th><th>累计出租</th></tr></thead>
+          <thead><tr><th>二维码</th><th>类型</th><th>品牌型号尺码</th><th>状态</th><th>暂停出租时间</th><th>持有人</th><th>课程/场次</th><th>课前适配</th><th>累计出租</th></tr></thead>
           <tbody>
             {list.map(i => <tr key={i.id}>
               <td className="mono small">{i.qr_code}</td>
               <td>{TYPE_LABEL[i.equipment_type]}</td>
               <td>{i.brand} {i.name} {i.size_label}</td>
-              <td><Badge color={i.rentable ? 'green' : i.status === 'out' ? 'blue' : i.status === 'repair' ? 'red' : 'gray'}>{i.status_label}</Badge></td>
+              <td><Badge color={i.rentable ? 'green' : i.status === 'out' ? 'blue' : i.status === 'repair' || i.status === 'inspection' ? 'red' : 'gray'}>{i.status_label}</Badge></td>
+              <td className="small">
+                {i.suspended_at ? <>⏸ {String(i.suspended_at).slice(5, 16)}
+                  {i.resumed_at ? <><br />▶ {String(i.resumed_at).slice(5, 16)}</> : <Badge color="orange">暂停中 {i.suspended_seconds >= 60 ? `${Math.round(i.suspended_seconds / 60)}分钟` : ''}</Badge>}</>
+                  : <span className="muted">—</span>}
+              </td>
               <td>{i.holder_name ? <>{i.holder_name}<div className="small muted">{i.holder_phone}</div></> : <span className="muted">—</span>}</td>
               <td className="small">{i.course_name || '—'}{i.session_type === 'night' ? ' 🌙' : ''}</td>
               <td>{i.fit_status === 'ok' ? <Badge color="green">适配</Badge> : i.fit_status === 'issue' ? <Badge color="red">不适配</Badge> : '—'}</td>
@@ -157,13 +162,15 @@ function Catalog() {
       {tab === 'model' ? <ModelForm onDone={load} /> : <ItemForm models={models} onDone={load} toast={toast} />}
       {!models ? <Loading /> : <div className="card" style={{ padding: 0, marginTop: 16 }}>
         <div className="table-wrap"><table>
-          <thead><tr><th>编码</th><th>类型</th><th>品牌/名称</th><th>尺码</th><th>租金</th><th>押金</th><th>库存/可用</th></tr></thead>
+          <thead><tr><th>编码</th><th>类型</th><th>品牌/名称</th><th>尺码</th><th>租金</th><th>押金</th><th>库存/可用/暂停</th></tr></thead>
           <tbody>
             {models.map(m => <tr key={m.id}>
               <td className="mono small">{m.code}</td><td>{TYPE_LABEL[m.type]}</td>
               <td>{m.brand} {m.name}</td><td><b>{m.size_label}</b></td>
               <td>{yuan(m.rental_fee)}</td><td>{yuan(m.deposit)}</td>
-              <td>{m.total} / <span className={m.available > 0 ? 'ok-text' : 'danger-text'}>{m.available}</span></td>
+              <td>{m.total} / <span className={m.available > 0 ? 'ok-text' : 'danger-text'}>{m.available}</span>
+                {m.suspended > 0 && <span className="danger-text"> / ⏸{m.suspended}（暂停出租，不计入推荐库存）</span>}
+              </td>
             </tr>)}
           </tbody>
         </table></div>

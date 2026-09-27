@@ -611,3 +611,353 @@ func TestMaintenanceGeneration(t *testing.T) {
 		t.Fatalf("应生成至少 1 条保养提醒，实际 %d", gen.Created)
 	}
 }
+
+// 板刃损伤鉴定全链路：
+// 出库拍照 + 教练课程区域摔倒登记 -> 归还发现缺口转鉴定（暂停出租）-> 游客说明 ->
+// 结算暂扣押金 -> 维修间四方证据定责（扣减/工单/理赔分别生成）-> 修复恢复 ->
+// 申诉维持后理赔冲抵；另覆盖无责上架与种子单的申诉成立撤销。
+func TestEdgeAppraisalLifecycle(t *testing.T) {
+	counter := login(t, "13800000003")
+	coach := login(t, "13800000002")
+	repair := login(t, "13800000004")
+	ins := login(t, "13800000005")
+
+	// ---------- 场景 A：新单走游客责任 ----------
+	g := login(t, "13900000001")
+	rid, skiRI := createDayRentalWithSki(t, g, counter, 2) // 安心险
+
+	// 教练在课程区域登记摔倒
+	code, e := req(t, "POST", "/coach/fall-record", coach, map[string]interface{}{
+		"rental_id": rid, "rental_item_id": skiRI,
+		"course_area": "魔毯区", "description": "下魔毯时侧摔一次",
+	}, nil)
+	mustOK(t, code, e["error"])
+	// 游客自报一条
+	code, e = req(t, "POST", fmt.Sprintf("/rentals/%d/fall-record", rid), g, map[string]interface{}{
+		"rental_item_id": skiRI, "course_area": "初级道", "description": "中途没站稳",
+	}, nil)
+	mustOK(t, code, e["error"])
+	// 柜台出库拍照留档
+	code, e = req(t, "POST", "/counter/checkout-photos", counter, map[string]interface{}{
+		"rental_item_id": skiRI, "photos": []string{"/uploads/checkout-ski.jpg"},
+	}, nil)
+	mustOK(t, code, e["error"])
+
+	// 排队日场归还
+	code, e = req(t, "POST", fmt.Sprintf("/rentals/%d/queue-return", rid), g,
+		map[string]interface{}{"night": false}, nil)
+	mustOK(t, code, e["error"])
+	// 雪板验具：板刃缺口存疑 -> 转鉴定
+	code, e = req(t, "POST", fmt.Sprintf("/counter/returns/%d/inspect", rid), counter,
+		map[string]interface{}{
+			"rental_item_id": skiRI, "result": "suspect_edge", "severity": "medium",
+			"description": "左板刃 2mm 缺口",
+			"photos":      []string{"/uploads/return-edge.jpg"},
+		}, nil)
+	mustOK(t, code, e["error"])
+
+	// 雪板明细应处于鉴定中；型号目录出现暂停出租计数
+	var cur struct {
+		Items []struct {
+			ID            int64  `json:"id"`
+			EquipmentType string `json:"equipment_type"`
+			Status        string `json:"status"`
+			ModelID       int64  `json:"model_id"`
+		} `json:"items"`
+	}
+	req(t, "GET", fmt.Sprintf("/rentals/%d", rid), g, nil, &cur)
+	var skiModelID int64
+	for _, it := range cur.Items {
+		if it.EquipmentType == "ski" {
+			if it.Status != "edge_appraisal" {
+				t.Fatalf("雪板应为 edge_appraisal，实际 %s", it.Status)
+			}
+			skiModelID = it.ModelID
+		}
+	}
+	var models []struct {
+		ID        int `json:"id"`
+		Suspended int `json:"suspended"`
+	}
+	req(t, "GET", "/models?type=ski", g, nil, &models)
+	foundSuspended := false
+	for _, m := range models {
+		if int64(m.ID) == skiModelID && m.Suspended >= 1 {
+			foundSuspended = true
+		}
+	}
+	if !foundSuspended {
+		t.Fatal("暂停出租的雪板应计入型号 suspended，影响库存推荐")
+	}
+
+	// 鉴定单进入维修间工作台
+	var bench []struct {
+		ID       int64  `json:"id"`
+		RentalID int64  `json:"rental_id"`
+		Status   string `json:"status"`
+	}
+	req(t, "GET", "/repair/edge-appraisals", repair, nil, &bench)
+	var appraisalID int64
+	for _, a := range bench {
+		if a.RentalID == rid && a.Status == "pending" {
+			appraisalID = a.ID
+		}
+	}
+	if appraisalID == 0 {
+		t.Fatal("维修间工作台应有该单待鉴定")
+	}
+
+	// 游客提交说明
+	code, e = req(t, "POST", fmt.Sprintf("/appraisals/%d/statement", appraisalID), g,
+		map[string]string{"statement": "都在教学区域滑行"}, nil)
+	mustOK(t, code, e["error"])
+
+	// 其余雪具完好验具后结算：雪板押金 1500 暂扣
+	for _, it := range cur.Items {
+		if it.Status == "out" {
+			req(t, "POST", fmt.Sprintf("/counter/returns/%d/inspect", rid), counter,
+				map[string]interface{}{"rental_item_id": it.ID, "result": "ok"}, nil)
+		}
+	}
+	var finish struct {
+		AppraisalHold float64 `json:"appraisal_hold"`
+		Refund        float64 `json:"refund"`
+		DepositHeld   float64 `json:"deposit_held"`
+	}
+	code, e = req(t, "POST", fmt.Sprintf("/counter/returns/%d/finish", rid), counter,
+		map[string]string{}, &finish)
+	mustOK(t, code, e["error"])
+	if finish.AppraisalHold != 1500 {
+		t.Fatalf("应暂扣雪板押金 1500，实际 %.2f", finish.AppraisalHold)
+	}
+	if finish.Refund != finish.DepositHeld-1500 {
+		t.Fatalf("暂扣部分不应退还：%.2f vs %.2f", finish.Refund, finish.DepositHeld-1500)
+	}
+
+	// 维修间认定游客责任（中等）：扣减 525、工单、理赔分别生成
+	var conf struct {
+		Deduction     float64 `json:"deduction"`
+		DamageID      int64   `json:"damage_id"`
+		RepairOrderID int64   `json:"repair_order_id"`
+		ClaimID       int64   `json:"claim_id"`
+	}
+	code, e = req(t, "POST", fmt.Sprintf("/repair/appraisals/%d/confirm", appraisalID), repair,
+		map[string]interface{}{
+			"responsibility": "guest", "severity": "medium",
+			"confirm_note": "缺口形态与硬磕碰一致",
+		}, &conf)
+	mustOK(t, code, e["error"])
+	if conf.Deduction != 525 || conf.DamageID == 0 || conf.RepairOrderID == 0 || conf.ClaimID == 0 {
+		t.Fatalf("三单应分别生成：%+v", conf)
+	}
+	// 暂扣押金扣除 525 后退还 975
+	logs := rentalLogs(t, rid, g)
+	assertLogAmount(t, logs, "deduct_damage", 525)
+	assertLogAmount(t, logs, "refund", 975)
+
+	// 游客申诉，柜台维持原判
+	code, e = req(t, "POST", fmt.Sprintf("/appraisals/%d/appeal", appraisalID), g,
+		map[string]string{"reason": "我不认可"}, nil)
+	mustOK(t, code, e["error"])
+	code, e = req(t, "POST", fmt.Sprintf("/counter/appraisals/%d/resolve-appeal", appraisalID), counter,
+		map[string]interface{}{"uphold": false, "note": "证据充分，维持"}, nil)
+	mustOK(t, code, e["error"])
+
+	// 理赔审核核定赔付（525-50 免赔=475）冲抵
+	var claims []struct {
+		ID       int64  `json:"id"`
+		Status   string `json:"status"`
+		RentalID int64  `json:"rental_id"`
+	}
+	req(t, "GET", "/insurance/claims", ins, nil, &claims)
+	var claimID int64
+	for _, cl := range claims {
+		if cl.RentalID == rid && cl.Status == "filed" {
+			claimID = cl.ID
+		}
+	}
+	if claimID == 0 {
+		t.Fatal("本单应有 filed 理赔")
+	}
+	req(t, "POST", fmt.Sprintf("/insurance/claims/%d/review", claimID), ins,
+		map[string]interface{}{"status": "approved"}, nil)
+	var pay struct {
+		Payout float64 `json:"payout"`
+	}
+	code, e = req(t, "POST", fmt.Sprintf("/insurance/claims/%d/pay", claimID), ins,
+		map[string]string{}, &pay)
+	mustOK(t, code, e["error"])
+	if pay.Payout != 475 {
+		t.Fatalf("赔付应为 475，实际 %.2f", pay.Payout)
+	}
+	logs = rentalLogs(t, rid, g)
+	assertLogAmount(t, logs, "insurance_offset", 475)
+
+	// 修复上架：恢复出租并记录 resumed_at
+	code, e = req(t, "POST", fmt.Sprintf("/repair/orders/%d/update", conf.RepairOrderID), repair,
+		map[string]interface{}{"status": "done", "repair_cost": 100}, nil)
+	mustOK(t, code, e["error"])
+	var orders []struct {
+		ID        int64  `json:"id"`
+		ResumedAt string `json:"resumed_at"`
+	}
+	req(t, "GET", "/repair/orders?all=1", repair, nil, &orders)
+	resumed := false
+	for _, o := range orders {
+		if o.ID == conf.RepairOrderID && o.ResumedAt != "" {
+			resumed = true
+		}
+	}
+	if !resumed {
+		t.Fatal("修复上架应记录恢复出租时间")
+	}
+
+	// ---------- 场景 B：认定无责，雪具直接恢复上架 ----------
+	g2 := login(t, "13900000003")
+	rid2, skiRI2 := createDayRentalWithSki(t, g2, counter, 0)
+	req(t, "POST", fmt.Sprintf("/rentals/%d/queue-return", rid2), g2,
+		map[string]interface{}{"night": false}, nil)
+	req(t, "POST", fmt.Sprintf("/counter/returns/%d/inspect", rid2), counter,
+		map[string]interface{}{
+			"rental_item_id": skiRI2, "result": "suspect_edge",
+			"description": "疑似旧痕",
+		}, nil)
+	var bench2 []struct {
+		ID       int64 `json:"id"`
+		RentalID int64 `json:"rental_id"`
+	}
+	req(t, "GET", "/repair/edge-appraisals", repair, nil, &bench2)
+	var a2 int64
+	for _, a := range bench2 {
+		if a.RentalID == rid2 {
+			a2 = a.ID
+		}
+	}
+	code, e = req(t, "POST", fmt.Sprintf("/repair/appraisals/%d/confirm", a2), repair,
+		map[string]interface{}{"responsibility": "none", "confirm_note": "正常磨损"}, nil)
+	mustOK(t, code, e["error"])
+	var d2 struct {
+		Items []struct {
+			EquipmentType string `json:"equipment_type"`
+			Status        string `json:"status"`
+		} `json:"items"`
+	}
+	req(t, "GET", fmt.Sprintf("/rentals/%d", rid2), g2, nil, &d2)
+	for _, it := range d2.Items {
+		if it.EquipmentType == "ski" && it.Status != "returned_ok" {
+			t.Fatalf("无责且不需维修时雪板应完好上架，实际 %s", it.Status)
+		}
+	}
+
+	// ---------- 场景 C：种子单 R-DEMO-D（rental_id=4）暂扣 + 申诉成立撤销 ----------
+	g3 := login(t, "13900000007")
+	var pending struct {
+		AppraisalHold float64 `json:"appraisal_hold"`
+	}
+	code, e = req(t, "POST", "/counter/returns/4/finish", counter, map[string]string{}, &pending)
+	mustOK(t, code, e["error"])
+	if pending.AppraisalHold != 1500 {
+		t.Fatalf("种子鉴定单暂扣应为 1500，实际 %.2f", pending.AppraisalHold)
+	}
+	var bench3 []struct {
+		ID       int64 `json:"id"`
+		RentalID int64 `json:"rental_id"`
+	}
+	req(t, "GET", "/repair/edge-appraisals", repair, nil, &bench3)
+	var a3 int64
+	for _, a := range bench3 {
+		if a.RentalID == 4 {
+			a3 = a.ID
+		}
+	}
+	req(t, "POST", fmt.Sprintf("/repair/appraisals/%d/confirm", a3), repair,
+		map[string]interface{}{"responsibility": "guest", "severity": "medium"}, nil)
+	req(t, "POST", fmt.Sprintf("/appraisals/%d/appeal", a3), g3,
+		map[string]string{"reason": "出库照片可见旧缺口"}, nil)
+	code, e = req(t, "POST", fmt.Sprintf("/counter/appraisals/%d/resolve-appeal", a3), counter,
+		map[string]interface{}{"uphold": true, "note": "复核出库照片成立"}, nil)
+	mustOK(t, code, e["error"])
+	logs3 := rentalLogs(t, 4, g3)
+	assertLogAmount(t, logs3, "deduct_reversal", 525)
+}
+
+// createDayRentalWithSki 下单（日场，可指定保险）、确认、整单出库，返回租赁单与雪板明细 id
+func createDayRentalWithSki(t *testing.T, guest, counter string, insuranceID int64) (int64, int64) {
+	t.Helper()
+	var slots []struct {
+		ID        int64 `json:"id"`
+		Remaining int   `json:"remaining"`
+	}
+	req(t, "GET", "/slots?session=day", guest, nil, &slots)
+	var slotID int64
+	for _, s := range slots {
+		if s.Remaining >= 1 {
+			slotID = s.ID
+			break
+		}
+	}
+	if slotID == 0 {
+		t.Skip("无可用日场时段")
+	}
+	body := map[string]interface{}{
+		"session_type": "day", "slot_id": slotID,
+		"include": map[string]bool{"protector": true},
+	}
+	if insuranceID > 0 {
+		body["insurance_product_id"] = insuranceID
+	}
+	var created struct {
+		Rentals []struct {
+			RentalID int64 `json:"rental_id"`
+		} `json:"rentals"`
+	}
+	code, e := req(t, "POST", "/rentals", guest, body, &created)
+	mustOK(t, code, e["error"])
+	rid := created.Rentals[0].RentalID
+	req(t, "POST", fmt.Sprintf("/rentals/%d/confirm", rid), guest, map[string]string{}, nil)
+	code, e = req(t, "POST", "/counter/checkout", counter,
+		map[string]interface{}{"rental_id": rid}, nil)
+	mustOK(t, code, e["error"])
+	var d struct {
+		Items []struct {
+			ID            int64  `json:"id"`
+			EquipmentType string `json:"equipment_type"`
+		} `json:"items"`
+	}
+	req(t, "GET", fmt.Sprintf("/rentals/%d", rid), guest, nil, &d)
+	for _, it := range d.Items {
+		if it.EquipmentType == "ski" {
+			return rid, it.ID
+		}
+	}
+	t.Fatal("未找到雪板明细")
+	return 0, 0
+}
+
+func rentalLogs(t *testing.T, rid int64, token string) []struct {
+	Type   string  `json:"type"`
+	Amount float64 `json:"amount"`
+} {
+	t.Helper()
+	var d struct {
+		DepositLogs []struct {
+			Type   string  `json:"type"`
+			Amount float64 `json:"amount"`
+		} `json:"deposit_logs"`
+	}
+	req(t, "GET", fmt.Sprintf("/rentals/%d", rid), token, nil, &d)
+	return d.DepositLogs
+}
+
+func assertLogAmount(t *testing.T, logs []struct {
+	Type   string  `json:"type"`
+	Amount float64 `json:"amount"`
+}, typ string, want float64) {
+	t.Helper()
+	for _, l := range logs {
+		if l.Type == typ && l.Amount == want {
+			return
+		}
+	}
+	t.Fatalf("押金流水缺少 %s=%.2f，实际 %+v", typ, want, logs)
+}

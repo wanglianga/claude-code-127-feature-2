@@ -438,6 +438,7 @@ SELECT row_to_json(x) FROM (
 			'id', ri.id, 'equipment_type', ri.equipment_type, 'recommended_size', ri.recommended_size,
 			'reason', ri.reason, 'fee', ri.fee, 'deposit', ri.deposit, 'status', ri.status,
 			'fit_status', ri.fit_status, 'fit_note', ri.fit_note,
+			'checkout_photos', ri.checkout_photos,
 			'model_id', ri.model_id, 'model_label', m.brand||' '||m.name||' '||m.size_label,
 			'item_id', ri.item_id, 'qr_code', ei.qr_code, 'serial_no', ei.serial_no,
 			'item_status', ei.status
@@ -458,6 +459,32 @@ SELECT row_to_json(x) FROM (
 				WHEN 'lost' THEN '雪具丢失' ELSE '其他异常' END
 		  ) ORDER BY d.id) FROM damage_reports d
 		  JOIN rental_items ri ON ri.id=d.rental_item_id WHERE ri.rental_id=r.id) AS damages,
+		(SELECT json_agg(json_build_object(
+			'id', f.id, 'course_area', f.course_area,
+			'happened_at', to_char(f.happened_at,'MM-DD HH24:MI'),
+			'description', f.description, 'source', f.source)
+		  ORDER BY f.happened_at) FROM fall_records f WHERE f.rental_id=r.id) AS fall_records,
+		(SELECT json_agg(json_build_object(
+			'id', ea.id, 'status', ea.status, 'responsibility', ea.responsibility,
+			'severity', ea.severity, 'deduction', ea.deduction,
+			'checkout_photos', ea.checkout_photos, 'return_photos', ea.return_photos,
+			'fall_snapshot', ea.fall_snapshot, 'course_areas', ea.course_areas,
+			'guest_statement', ea.guest_statement, 'return_note', ea.return_note,
+			'confirm_note', ea.confirm_note,
+			'appeal_status', ea.appeal_status, 'appeal_reason', ea.appeal_reason,
+			'handle_note', ea.handle_note,
+			'damage_id', ea.damage_id, 'repair_order_id', ea.repair_order_id, 'claim_id', ea.claim_id,
+			'rental_item_id', ea.rental_item_id, 'item_id', ea.item_id,
+			'created_at', to_char(ea.created_at,'MM-DD HH24:MI'),
+			'confirmed_at', to_char(ea.confirmed_at,'MM-DD HH24:MI'),
+			'qr_code', i.qr_code, 'model_label', m.brand||' '||m.name||' '||m.size_label,
+			'suspended_at', to_char(i.suspended_at,'MM-DD HH24:MI'),
+			'resumed_at', to_char(i.resumed_at,'MM-DD HH24:MI')
+		  ) ORDER BY ea.id) FROM edge_appraisals ea
+		  JOIN equipment_items i ON i.id=ea.item_id
+		  JOIN rental_items ri2 ON ri2.id=ea.rental_item_id
+		  JOIN equipment_models m ON m.id=ri2.model_id
+		  WHERE ea.rental_id=r.id) AS appraisals,
 		(SELECT json_agg(json_build_object(
 			'id', dt.id, 'type', dt.type, 'amount', dt.amount, 'note', dt.note, 'created_at', dt.created_at
 		  ) ORDER BY dt.id) FROM deposit_transactions dt WHERE dt.rental_id=r.id) AS deposit_logs,

@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react'
-import { api, yuan, TYPE_LABEL, DAMAGE_TYPES, uploadPhoto } from '../api.js'
+import { api, yuan, TYPE_LABEL, DAMAGE_TYPES, RESP_LABEL, APPEAL_STATUS, APPRAISAL_STATUS, uploadPhoto } from '../api.js'
 import { Badge, Modal, Field, Loading, Empty, useToast } from '../components/ui.jsx'
 import RentalDetail from '../components/RentalDetail.jsx'
 
@@ -7,6 +7,7 @@ export default function CounterPage({ page, go }) {
   if (page === 'checkout') return <Checkout />
   if (page === 'exchanges') return <Exchanges />
   if (page === 'returns') return <Returns />
+  if (page === 'appraisals') return <Appraisals />
   return <QueueBoard />
 }
 
@@ -137,7 +138,7 @@ function Checkout() {
           <Badge color={rental.status === 'reserved' ? 'blue' : 'red'}>{rental.status}</Badge>
         </div>
         <table>
-          <thead><tr><th>类型</th><th>建议</th><th>预留雪具</th><th>二维码</th><th>核验</th></tr></thead>
+          <thead><tr><th>类型</th><th>建议</th><th>预留雪具</th><th>二维码</th><th>核验</th><th>出库留档</th></tr></thead>
           <tbody>
             {rental.items.map(i => (
               <tr key={i.id}>
@@ -145,6 +146,7 @@ function Checkout() {
                 <td>{i.model_label}</td><td className="mono small">{i.qr_code}</td>
                 <td>{checked.includes(i.qr_code) ? <Badge color="green">✓ 已扫</Badge> :
                   <Badge color="gray">整单出库时可免扫</Badge>}</td>
+                <td><CheckoutPhotoBtn item={i} onDone={loadRental} /></td>
               </tr>
             ))}
           </tbody>
@@ -239,6 +241,30 @@ function ExchangeActions({ onProcess }) {
   )
 }
 
+// ---------- 出库逐件拍照留档 ----------
+function CheckoutPhotoBtn({ item, onDone }) {
+  const toast = useToast()
+  const onFile = async (f) => {
+    try {
+      const url = await uploadPhoto(f)
+      await api('POST', '/counter/checkout-photos', { rental_item_id: item.id, photos: [url] })
+      toast('出库照片已留档'); onDone()
+    } catch (e) { toast(e.message, 'error') }
+  }
+  return (
+    <div className="inline">
+      {item.checkout_photos?.length > 0
+        ? <><Badge color="green">已留档 {item.checkout_photos.length} 张</Badge>
+            <label className="btn sm ghost" style={{ marginLeft: 6 }}>补拍
+              <input type="file" accept="image/*" hidden onChange={e => e.target.files[0] && onFile(e.target.files[0])} />
+            </label></>
+        : <label className="btn sm">📷 出库拍照
+            <input type="file" accept="image/*" hidden onChange={e => e.target.files[0] && onFile(e.target.files[0])} />
+          </label>}
+    </div>
+  )
+}
+
 // ---------- 归还验损 ----------
 function Returns() {
   const [qtype, setQtype] = useState('return_day')
@@ -318,7 +344,9 @@ function ReturnInspect({ rental, onBack, onChanged }) {
       {result && <div className="alert info">
         <b>归还结算完成</b>
         <div className="small">使用时长 {result.used_hours} 小时；冻结 {yuan(result.deposit_held)}，
-          扣减 {yuan(result.deducted)}（含超时 {yuan(result.late_fee)}），退还 <b className="ok-text">{yuan(result.refund)}</b></div>
+          扣减 {yuan(result.deducted)}（含超时 {yuan(result.late_fee)}），
+          {Number(result.appraisal_hold) > 0 && <b className="danger-text">鉴定暂扣 {yuan(result.appraisal_hold)}（定责后结清），</b>}
+          退还 <b className="ok-text">{yuan(result.refund)}</b></div>
         <div className="small muted">{result.insurance_hint}</div>
       </div>}
 
@@ -329,8 +357,8 @@ function ReturnInspect({ rental, onBack, onChanged }) {
             <tr key={i.id}>
               <td>{TYPE_LABEL[i.equipment_type]}</td><td>{i.model_label}</td>
               <td className="mono small">{i.qr_code}</td>
-              <td><Badge color={i.status === 'returned_ok' ? 'green' : i.status === 'out' ? 'orange' : i.status === 'repair' || i.status === 'returned_damaged' ? 'red' : 'gray'}>{
-                { returned_ok: '✓ 完好', out: '待验', repair: '送修', returned_damaged: '损坏登记', lost: '丢失' }[i.status] || i.status
+              <td><Badge color={i.status === 'returned_ok' ? 'green' : i.status === 'out' ? 'orange' : i.status === 'repair' || i.status === 'returned_damaged' ? 'red' : i.status === 'edge_appraisal' ? 'orange' : 'gray'}>{
+                { returned_ok: '✓ 完好', out: '待验', repair: '送修', returned_damaged: '损坏登记', lost: '丢失', edge_appraisal: '🔍 板刃鉴定中' }[i.status] || i.status
               }</Badge></td>
               <td className="small">{i.fit_note || (i.fit_status === 'ok' ? '合适合规' : '—')}</td>
               <td>{i.status === 'out' && <button className="btn sm" onClick={() => { setTarget(i.id); setForm({ result: 'ok', damage_type: 'edge_damage', severity: 'medium', description: '', photos: [] }) }}>验具</button>}</td>
@@ -359,10 +387,26 @@ function ReturnInspect({ rental, onBack, onChanged }) {
         <Field label="验具结果">
           <div className="seg">
             <button className={form.result === 'ok' ? 'on' : ''} onClick={() => setForm({ ...form, result: 'ok' })}>✓ 完好上架</button>
+            <button className={form.result === 'suspect_edge' ? 'on' : ''} onClick={() => setForm({ ...form, result: 'suspect_edge', damage_type: 'edge_damage' })}>🔍 板刃缺口存疑（转鉴定）</button>
             <button className={form.result === 'damaged' ? 'on' : ''} onClick={() => setForm({ ...form, result: 'damaged' })}>损坏</button>
             <button className={form.result === 'lost' ? 'on' : ''} onClick={() => setForm({ ...form, result: 'lost' })}>丢失</button>
           </div>
         </Field>
+        {form.result === 'suspect_edge' && <>
+          <div className="alert warn small">
+            雪具将暂扣、<b>暂停出租</b>并转维修间对比四方证据（出库照片 / 课程区域 / 摔倒记录 / 游客说明）认定责任；
+            责任确认后押金扣减、维修工单、保险理赔分别生成。
+          </div>
+          <Field label="缺口初判严重程度">
+            <select value={form.severity} onChange={e => setForm({ ...form, severity: e.target.value })}>
+              <option value="light">轻微</option><option value="medium">中等</option>
+              <option value="heavy">严重（缺口较大/卷刃）</option>
+            </select>
+          </Field>
+          <Field label="柜台初检描述"><textarea rows={2} value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} placeholder="缺口位置、长度、目检情况" /></Field>
+          <Field label="归还照片（鉴定依据，建议必拍）"><input type="file" accept="image/*" onChange={e => e.target.files[0] && onFile(e.target.files[0])} /></Field>
+          {form.photos.length > 0 && <div className="photos">{form.photos.map((p, i) => <img key={i} src={p} alt="" />)}</div>}
+        </>}
         {form.result === 'damaged' && <>
           <div className="row">
             <Field label="损坏类型">
@@ -389,5 +433,129 @@ function ReturnInspect({ rental, onBack, onChanged }) {
         </div>
       </Modal>}
     </div>
+  )
+}
+
+// ---------- 板刃损伤鉴定（柜台同步查看 + 申诉复核） ----------
+function Appraisals() {
+  const [list, setList] = useState(null)
+  const [detail, setDetail] = useState(null)
+  const load = useCallback(async () => setList(await api('GET', '/counter/edge-appraisals')), [])
+  useEffect(() => { load() }, [])
+  if (!list) return <Loading />
+  const groups = [
+    ['pending', '待维修间认定'],
+    ['confirmed', '已定责（含待处理申诉）'],
+    ['disputed', '申诉复核中'],
+    ['reversed', '申诉成立已撤销'],
+  ]
+  return (
+    <div>
+      <h2 style={{ fontSize: 18 }}>板刃损伤鉴定 · 柜台同步</h2>
+      <p className="muted small">与维修间数据实时同步：归还发现板刃缺口暂扣雪具后在此跟踪；游客申诉时可调出课程区域与归还照片复核。</p>
+      {list.length === 0 && <Empty text="当前没有板刃鉴定单" />}
+      {groups.map(([st, label]) => {
+        const arr = list.filter(a => a.status === st)
+        return arr.length > 0 && (
+          <div key={st} style={{ marginBottom: 16 }}>
+            <h4>{label} <Badge color="orange">{arr.length}</Badge></h4>
+            <div className="grid grid-2">
+              {arr.map(a => <AppraisalCard key={a.id} a={a} onDone={load} onOpen={setDetail} />)}
+            </div>
+          </div>
+        )
+      })}
+      {detail && <AppraisalCounterModal a={list.find(x => x.id === detail)} onClose={() => setDetail(null)} onDone={load} />}
+    </div>
+  )
+}
+
+function AppraisalCard({ a, onDone, onOpen }) {
+  return (
+    <div className="card">
+      <div className="btn-row">
+        <b>鉴定 #{a.id} · {a.rental_code}</b>
+        <span className="spacer" style={{ flex: 1 }} />
+        <Badge color={(APPRAISAL_STATUS[a.status] || [, 'gray'])[1]}>{(APPRAISAL_STATUS[a.status] || [a.status])[0]}</Badge>
+      </div>
+      <div className="small">{a.guest_name} {a.guest_phone} · {a.brand} {a.name} {a.size_label} <span className="mono">{a.qr_code}</span></div>
+      <div className="small muted">发起 {a.created_at} · 暂停出租 {a.suspended_at || '—'} {a.resumed_at ? '→ 已恢复 ' + a.resumed_at : '（暂停中）'}</div>
+      {a.responsibility !== 'pending' && <div className="small" style={{ marginTop: 4 }}>
+        <Badge color={a.responsibility === 'guest' ? 'red' : 'green'}>{RESP_LABEL[a.responsibility]}</Badge>
+        {a.deduction > 0 && <span> · 扣 {yuan(a.deduction)}</span>}
+        {a.repair_order_id && <span> · 工单 #{a.repair_order_id}</span>}
+        {a.claim_id && <span> · 理赔 #${a.claim_id}</span>}
+      </div>}
+      <div className="modal-foot" style={{ paddingRight: 0 }}>
+        <button className="btn sm ghost" onClick={() => onOpen(a.id)}>查看证据/处理申诉</button>
+      </div>
+    </div>
+  )
+}
+
+// 柜台看完整证据包：出库照片 vs 归还照片、课程区域、摔倒快照、游客说明；可处理申诉
+function AppraisalCounterModal({ a, onClose, onDone }) {
+  const toast = useToast()
+  const [note, setNote] = useState('')
+  const resolve = async (uphold) => {
+    try {
+      const d = await api('POST', `/counter/appraisals/${a.id}/resolve-appeal`, { uphold, note })
+      toast(d.message); onDone(); onClose()
+    } catch (e) { toast(e.message, 'error') }
+  }
+  return (
+    <Modal title={`板刃鉴定 #${a.id} · ${a.rental_code}`} onClose={onClose} width={720}>
+      <div className="btn-row">
+        <Badge color={(APPRAISAL_STATUS[a.status] || [, 'gray'])[1]}>{(APPRAISAL_STATUS[a.status] || [a.status])[0]}</Badge>
+        {a.responsibility !== 'pending' && <Badge color={a.responsibility === 'guest' ? 'red' : 'green'}>{RESP_LABEL[a.responsibility]}</Badge>}
+        <Badge color="gray">{APPEAL_STATUS[a.appeal_status]}</Badge>
+        <span className="spacer" style={{ flex: 1 }} />
+        <span className="small muted">{a.guest_name} · {a.course_name || '自由滑'}</span>
+      </div>
+
+      <div className="grid grid-2" style={{ gap: 10 }}>
+        <div className="alert info" style={{ margin: 0 }}>
+          <b>📷 出库照片</b>
+          {a.checkout_photos?.length > 0
+            ? <div className="photos">{a.checkout_photos.map((p, i) => <img key={i} src={p} alt="出库" />)}</div>
+            : <div className="small muted">无留档</div>}
+        </div>
+        <div className="alert red" style={{ margin: 0 }}>
+          <b>📸 归还照片</b>
+          {a.return_photos?.length > 0
+            ? <div className="photos">{a.return_photos.map((p, i) => <img key={i} src={p} alt="归还" />)}</div>
+            : <div className="small muted">无照片 · {a.return_note}</div>}
+        </div>
+        <div className="alert warn" style={{ margin: 0 }}>
+          <b>🗺 课程区域 / 摔倒记录</b>
+          <div className="small">涉及：{a.course_areas || '无区域记录'}</div>
+          {a.fall_snapshot?.map((f, i) => (
+            <div key={i} className="small">{f.happened_at} · {f.course_area} · {f.source === 'coach' ? '教练登记' : '游客自报'}：{f.description}</div>
+          ))}
+        </div>
+        <div className="alert" style={{ margin: 0 }}>
+          <b>🗣 游客说明</b>
+          <div className="small">{a.guest_statement || '（未提交）'}</div>
+        </div>
+      </div>
+
+      {a.confirm_note && <div className="small muted" style={{ marginTop: 8 }}>维修间认定说明：{a.confirm_note}</div>}
+      {a.appeal_reason && <div className="alert red small" style={{ marginTop: 8 }}>
+        游客申诉（{a.appealed_at}）：{a.appeal_reason}
+      </div>}
+      {a.handle_note && <div className="small muted">上次复核：{a.handle_note}</div>}
+
+      {a.status === 'disputed' && a.appeal_status === 'requested' && <>
+        <Field label="复核备注（写入单据）">
+          <textarea rows={2} value={note} onChange={e => setNote(e.target.value)} placeholder="对比出库/归还照片与课程区域后的判断" />
+        </Field>
+        <div className="modal-foot">
+          <button className="btn ghost" onClick={onClose}>取消</button>
+          <button className="btn danger" onClick={() => resolve(false)}>维持原认定（驳回申诉）</button>
+          <button className="btn" onClick={() => resolve(true)}>申诉成立 · 撤销扣减返还</button>
+        </div>
+      </>}
+      {a.status === 'pending' && <div className="alert info small" style={{ marginTop: 10 }}>等待维修间在「维修工单 → 板刃鉴定工作台」认定责任，柜台数据实时同步。</div>}
+    </Modal>
   )
 }

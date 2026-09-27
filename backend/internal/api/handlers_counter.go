@@ -551,34 +551,7 @@ func (s *Server) assessDamage(tx *sql.Tx, stage string, rentalID, riID, itemID i
 	}
 
 	// 保险联动：有效保单且覆盖该损坏类型 -> 自动立案
-	var productID, policyID int64
-	coverErr := tx.QueryRow(`SELECT ip.product_id, ip.id FROM insurance_policies ip
-		WHERE ip.rental_id=$1 AND ip.status='active' LIMIT 1`, rentalID).
-		Scan(&productID, &policyID)
-	if coverErr == nil {
-		var deductible, capAmt float64
-		var covers pq.StringArray
-		if err := tx.QueryRow(`SELECT deductible, coverage_cap, covers FROM insurance_products WHERE id=$1`,
-			productID).Scan(&deductible, &capAmt, &covers); err == nil {
-			covered := false
-			for _, c := range covers {
-				if c == damageType {
-					covered = true
-					break
-				}
-			}
-			res := rules.CalcClaim(deduction, deductible, capAmt, covered)
-			var claimID int64
-			tx.QueryRow(`INSERT INTO insurance_claims
-				(policy_id, damage_id, amount_requested, deductible, amount_approved, status, note)
-				VALUES ($1,$2,$3,$4,$5,'filed',$6) RETURNING id`,
-				policyID, dID, res.Requested, deductible, res.Approved, res.Message).Scan(&claimID)
-			tx.Exec(`UPDATE damage_reports SET claim_id=$1, status=
-				CASE WHEN status='repair_created' THEN 'repair_created' ELSE 'assessed' END WHERE id=$2`,
-				claimID, dID)
-			tx.Exec(`UPDATE insurance_policies SET status='claimed' WHERE id=$1`, policyID)
-		}
-	}
+	s.fileClaimIfCovered(tx, rentalID, dID, damageType, deduction)
 	return deduction, dID, nil
 }
 
@@ -617,6 +590,12 @@ func (s *Server) inspectReturnItem(w http.ResponseWriter, r *http.Request) {
 			itemID.Int64)
 		tx.Exec(`UPDATE rental_items SET status='returned_ok', returned_at=now() WHERE id=$1`,
 			req.RentalItemID)
+	} else if req.Result == "suspect_edge" {
+		// 板刃缺口存疑：暂扣雪具转维修间鉴定，责任认定后再生成扣减/工单/理赔
+		if _, err := s.transferToEdgeAppraisal(tx, rid, req, c.UserID); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	} else {
 		if _, _, err := s.assessDamage(tx, "at_return", rid, req.RentalItemID, itemID.Int64, req, c.UserID); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
@@ -632,6 +611,8 @@ func (s *Server) inspectReturnItem(w http.ResponseWriter, r *http.Request) {
 		msg = "已登记损坏、生成维修工单，押金扣减与保险立案已同步"
 	} else if req.Result == "lost" {
 		msg = "已按丢失登记，押金全额扣减"
+	} else if req.Result == "suspect_edge" {
+		msg = "雪具已暂扣并转维修间板刃鉴定，暂停出租；责任认定后生成扣减/工单/理赔"
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"message": msg})
 }
@@ -683,12 +664,44 @@ func (s *Server) finishReturn(w http.ResponseWriter, r *http.Request) {
 
 	var deducted float64
 	tx.QueryRow(`SELECT COALESCE(sum(amount),0) FROM deposit_transactions
-		WHERE rental_id=$1 AND type LIKE 'deduct%'`, rid).Scan(&deducted)
+		WHERE rental_id=$1 AND type LIKE 'deduct%' AND type <> 'deduct_reversal'`, rid).Scan(&deducted)
 	var offsets float64
 	tx.QueryRow(`SELECT COALESCE(sum(amount),0) FROM deposit_transactions
-		WHERE rental_id=$1 AND type='insurance_offset'`, rid).Scan(&offsets)
+		WHERE rental_id=$1 AND type IN ('insurance_offset','deduct_reversal')`, rid).Scan(&offsets)
+
+	// 板刃鉴定中的雪具：暂扣该件押金，待维修间认定责任后结清
+	type holdRow struct {
+		appraisalID int64
+		deposit     float64
+	}
+	var holds []holdRow
+	hrows, herr := tx.Query(`SELECT ea.id, ri.deposit FROM rental_items ri
+		JOIN edge_appraisals ea ON ea.rental_item_id=ri.id AND ea.status='pending'
+		WHERE ri.rental_id=$1 AND ri.status='edge_appraisal'`, rid)
+	if herr != nil {
+		writeError(w, http.StatusInternalServerError, herr.Error())
+		return
+	}
+	for hrows.Next() {
+		var h holdRow
+		if err := hrows.Scan(&h.appraisalID, &h.deposit); err != nil {
+			hrows.Close()
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		holds = append(holds, h)
+	}
+	hrows.Close()
+	appraisalHold := 0.0
+	for _, h := range holds {
+		appraisalHold += h.deposit
+		tx.Exec(`INSERT INTO deposit_transactions(rental_id, type, amount, appraisal_id, note, created_by)
+			VALUES ($1,'hold_appraisal',$2,$3,'板刃缺口鉴定中，暂扣该件押金，待责任认定后结清',$4)`,
+			rid, h.deposit, h.appraisalID, c.UserID)
+	}
+
 	held := depositTotal
-	refund := held - deducted + offsets
+	refund := held - deducted + offsets - appraisalHold
 	if refund < 0 {
 		refund = 0
 	}
@@ -717,6 +730,7 @@ func (s *Server) finishReturn(w http.ResponseWriter, r *http.Request) {
 		"deposit_held":   held,
 		"deducted":       deducted,
 		"late_fee":       lateFee,
+		"appraisal_hold": appraisalHold,
 		"refund":         refund,
 		"used_hours":     round2f(usedHours),
 		"insurance_hint": "如有保险理赔，审核赔付后金额将另行返还，可在订单中查看依据",

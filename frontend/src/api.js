@@ -44,8 +44,24 @@ export const RENTAL_STATUS = {
 
 export const ITEM_STATUS = {
   suggested: '建议', assigned: '已预留', out: '使用中', exchanged: '已调换',
-  returned_ok: '完好归还', returned_damaged: '损坏归还', repair: '维修中', lost: '丢失'
+  returned_ok: '完好归还', returned_damaged: '损坏归还', repair: '维修中', lost: '丢失',
+  edge_appraisal: '板刃鉴定中'
 }
+
+export const APPRAISAL_STATUS = {
+  pending: ['待鉴定', 'orange'], confirmed: ['已定责', 'blue'],
+  disputed: ['申诉复核中', 'red'], reversed: ['申诉成立已撤销', 'green'], closed: ['已结案', 'gray']
+}
+
+export const RESP_LABEL = {
+  pending: '待认定', guest: '游客责任', preexist: '出库前已存在', none: '无责/正常磨损'
+}
+
+export const APPEAL_STATUS = {
+  none: '未申诉', requested: '待柜台复核', upheld: '申诉成立', rejected: '申诉驳回'
+}
+
+export const COURSE_AREAS = ['魔毯区', '初级道', '初级道顶部', '中级道', '中级道入口', '高级道', '公园道具区', '缆车下站', '雪具大厅外']
 
 export const DAMAGE_LABEL = {
   edge_damage: '板刃损伤', base_scratch: '板底划伤', binding_issue: '固定器故障',

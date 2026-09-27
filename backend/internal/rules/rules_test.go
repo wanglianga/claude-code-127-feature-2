@@ -134,3 +134,34 @@ func TestLateFeeAndNight(t *testing.T) {
 		t.Fatal("zero hours = zero fee")
 	}
 }
+
+func TestEdgeAppraisalDecision(t *testing.T) {
+	// 游客责任：板刃 35%，押金 1500 -> 525；开工单、可立案
+	d := EdgeAppraisal("guest", "medium", 1500)
+	if d.Deduction != 525 || !d.CreateRepair || !d.ClaimEligible {
+		t.Fatalf("guest medium decision = %+v", d)
+	}
+	// 轻微 ×0.5 -> 262.5
+	d = EdgeAppraisal("guest", "light", 1500)
+	if d.Deduction != 262.5 {
+		t.Fatalf("guest light deduction = %v want 262.5", d.Deduction)
+	}
+	// 严重 ×1.5 -> 787.5
+	d = EdgeAppraisal("guest", "heavy", 1500)
+	if d.Deduction != 787.5 {
+		t.Fatalf("guest heavy deduction = %v want 787.5", d.Deduction)
+	}
+	// 出库前已存在：不扣、不修保险，但开工单由平台承担
+	d = EdgeAppraisal("preexist", "medium", 1500)
+	if d.Deduction != 0 || d.ClaimEligible || !d.CreateRepair {
+		t.Fatalf("preexist decision = %+v", d)
+	}
+	// 无责：不扣、不立案
+	d = EdgeAppraisal("none", "medium", 1500)
+	if d.Deduction != 0 || d.ClaimEligible || d.CreateRepair {
+		t.Fatalf("none decision = %+v", d)
+	}
+	if ResponsibilityLabel("guest") != "游客责任" || ResponsibilityLabel("preexist") != "出库前已存在" {
+		t.Fatal("responsibility labels wrong")
+	}
+}

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react'
-import { api, yuan, TYPE_LABEL, RENTAL_STATUS, ITEM_STATUS, DAMAGE_TYPES, uploadPhoto } from '../api.js'
+import { api, yuan, TYPE_LABEL, RENTAL_STATUS, ITEM_STATUS, DAMAGE_TYPES, APPEAL_STATUS, RESP_LABEL, APPRAISAL_STATUS, COURSE_AREAS, uploadPhoto } from '../api.js'
 import { Badge, Modal, Field, useToast, Empty, Loading } from './ui.jsx'
 
 function statusBadge(s) {
@@ -65,6 +65,11 @@ export default function RentalDetail({ id, onClose, onChanged, asGuest, canAsses
                 <td>
                   {i.model_label || '—'}
                   {i.qr_code && <div className="small mono muted">{i.qr_code}</div>}
+                  {i.checkout_photos?.length > 0 && (
+                    <div className="photos" style={{ marginTop: 4 }}>
+                      {i.checkout_photos.map((p, k) => <img key={k} src={p} alt="出库照片" title="出库时留档照片" />)}
+                    </div>
+                  )}
                 </td>
                 <td className="small">{yuan(i.fee)} / {yuan(i.deposit)}</td>
                 <td><Badge color={riColor(i.status)}>{ITEM_STATUS[i.status] || i.status}</Badge></td>
@@ -86,6 +91,7 @@ export default function RentalDetail({ id, onClose, onChanged, asGuest, canAsses
                 <ExchangeBtn rental={r} onDone={load} />
                 <ExtendBtn rental={r} onDone={load} />
                 <DamageBtn rental={r} onDone={load} />
+                <FallBtn rental={r} onDone={load} />
                 <button className="btn ghost" onClick={() => act('POST', `/rentals/${r.id}/queue-return`, { night: r.session_type === 'night' })}>
                   {r.session_type === 'night' ? '🌙 排队夜场归还' : '排队日场归还'}
                 </button>
@@ -97,6 +103,26 @@ export default function RentalDetail({ id, onClose, onChanged, asGuest, canAsses
           </div>
         </div>
       )}
+
+      {/* 摔倒记录（课程区域证据） */}
+      {r.fall_records?.length > 0 && (
+        <>
+          <h4>摔倒记录（课程区域 · 鉴定证据）</h4>
+          <ul className="timeline">
+            {r.fall_records.map(f => (
+              <li key={f.id}>
+                <b>📍 {f.course_area} <Badge color={f.source === 'coach' ? 'blue' : 'cyan'}>{f.source === 'coach' ? '教练登记' : '游客自报'}</Badge></b>
+                <div className="small muted">{f.happened_at} · {f.description}</div>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+
+      {/* 板刃损伤鉴定 */}
+      {r.appraisals?.length > 0 && r.appraisals.map(a => (
+        <AppraisalBlock key={a.id} appraisal={a} asGuest={asGuest} onChanged={load} />
+      ))}
 
       {/* 损坏与赔付依据 */}
       {r.damages?.length > 0 && (
@@ -159,9 +185,113 @@ export default function RentalDetail({ id, onClose, onChanged, asGuest, canAsses
   )
 }
 
+// 板刃鉴定区块：四方证据对比 + 责任结论 + 游客说明/申诉
+function AppraisalBlock({ appraisal: a, asGuest, onChanged }) {
+  const toast = useToast()
+  const [, sc] = APPRAISAL_STATUS[a.status] || [a.status, 'gray']
+  const [showStatement, setShowStatement] = useState(false)
+  const [showAppeal, setShowAppeal] = useState(false)
+  const [text, setText] = useState(a.guest_statement || '')
+
+  const submitStatement = async () => {
+    try {
+      const d = await api('POST', `/appraisals/${a.id}/statement`, { statement: text })
+      toast(d.message); setShowStatement(false); onChanged()
+    } catch (e) { toast(e.message, 'error') }
+  }
+  const submitAppeal = async () => {
+    try {
+      const d = await api('POST', `/appraisals/${a.id}/appeal`, { reason: text })
+      toast(d.message); setShowAppeal(false); onChanged()
+    } catch (e) { toast(e.message, 'error') }
+  }
+
+  return (
+    <div className="card" style={{ borderColor: '#fdba74', marginTop: 14 }}>
+      <div className="btn-row">
+        <h4 style={{ margin: 0 }}>🔍 板刃损伤鉴定 #{a.id} · {a.model_label} <span className="mono small">{a.qr_code}</span></h4>
+        <span className="spacer" style={{ flex: 1 }} />
+        <Badge color={sc}>{(APPRAISAL_STATUS[a.status] || [a.status])[0]}</Badge>
+        {a.responsibility !== 'pending' && <Badge color={a.responsibility === 'guest' ? 'red' : 'green'}>{RESP_LABEL[a.responsibility]}</Badge>}
+      </div>
+      <div className="small muted" style={{ margin: '4px 0' }}>
+        发起于 {a.created_at}{a.confirmed_at ? ` · 维修间确认于 ${a.confirmed_at}` : ''} ·
+        暂停出租 {a.suspended_at || '—'}{a.resumed_at ? ` → 恢复 ${a.resumed_at}` : '（进行中）'}
+      </div>
+
+      <div className="grid grid-2" style={{ gap: 10 }}>
+        <div className="alert info" style={{ margin: 0 }}>
+          <b>📷 出库照片（对比基准）</b>
+          {a.checkout_photos?.length > 0
+            ? <div className="photos">{a.checkout_photos.map((p, i) => <img key={i} src={p} alt="出库照片" />)}</div>
+            : <div className="small muted" style={{ marginTop: 4 }}>无出库留档照片</div>}
+        </div>
+        <div className="alert red" style={{ margin: 0 }}>
+          <b>📸 归还照片（发现缺口）</b>
+          {a.return_photos?.length > 0
+            ? <div className="photos">{a.return_photos.map((p, i) => <img key={i} src={p} alt="归还照片" />)}</div>
+            : <div className="small muted" style={{ marginTop: 4 }}>无照片 · 柜台初检：{a.return_note}</div>}
+        </div>
+        <div className="alert warn" style={{ margin: 0 }}>
+          <b>🗺 课程区域 · 摔倒记录</b>
+          {a.course_areas ? <div className="small">涉及区域：{a.course_areas}</div> : <div className="small muted">无摔倒区域记录</div>}
+          {a.fall_snapshot?.length > 0 && a.fall_snapshot.map((f, i) => (
+            <div key={i} className="small" style={{ marginTop: 2 }}>
+              {f.happened_at} · {f.course_area} · {f.source === 'coach' ? '教练登记' : '游客自报'}：{f.description}
+            </div>
+          ))}
+        </div>
+        <div className="alert" style={{ margin: 0 }}>
+          <b>🗣 游客说明</b>
+          <div className="small" style={{ marginTop: 4 }}>{a.guest_statement || '（游客尚未提交说明）'}</div>
+        </div>
+      </div>
+
+      {a.status !== 'pending' && (
+        <div className="small" style={{ marginTop: 8 }}>
+          维修间认定：<b>{RESP_LABEL[a.responsibility]}</b>（{a.severity === 'light' ? '轻微' : a.severity === 'heavy' ? '严重' : '中等'}） ·
+          扣减押金 <b className={a.deduction > 0 ? 'danger-text' : 'ok-text'}>{yuan(a.deduction)}</b>
+          {a.repair_order_id ? ` · 维修工单 #${a.repair_order_id}` : ''}
+          {a.claim_id ? ` · 保险理赔 #${a.claim_id}` : ''}
+          {a.confirm_note && <div className="muted">认定说明：{a.confirm_note}</div>}
+        </div>
+      )}
+
+      {a.appeal_status !== 'none' && (
+        <div className="small" style={{ marginTop: 6 }}>
+          申诉状态：<Badge color={a.appeal_status === 'upheld' ? 'green' : a.appeal_status === 'rejected' ? 'gray' : 'red'}>{APPEAL_STATUS[a.appeal_status]}</Badge>
+          {a.appeal_reason && <span className="muted"> 理由：{a.appeal_reason}</span>}
+          {a.handle_note && <div className="muted">柜台复核：{a.handle_note}</div>}
+        </div>
+      )}
+
+      {asGuest && a.status === 'pending' && (
+        <div className="modal-foot" style={{ paddingRight: 0 }}>
+          <button className="btn sm" onClick={() => { setShowStatement(v => !v); setText(a.guest_statement || '') }}>
+            {a.guest_statement ? '补充说明' : '提交情况说明'}
+          </button>
+          {showStatement && <div className="inline" style={{ flex: 1 }}>
+            <input style={{ width: '70%' }} value={text} onChange={e => setText(e.target.value)} placeholder="滑行过程、摔倒位置、对缺口的说明" />
+            <button className="btn sm" onClick={submitStatement}>提交给维修间</button>
+          </div>}
+        </div>
+      )}
+      {asGuest && a.status === 'confirmed' && a.responsibility === 'guest' && a.appeal_status === 'none' && (
+        <div className="modal-foot" style={{ paddingRight: 0 }}>
+          <button className="btn sm warn" onClick={() => { setShowAppeal(v => !v); setText('') }}>我要申诉（柜台将复核证据）</button>
+          {showAppeal && <div className="inline" style={{ flex: 1 }}>
+            <input style={{ width: '70%' }} value={text} onChange={e => setText(e.target.value)} placeholder="申诉理由，如出库前已存在/课程区域无关" />
+            <button className="btn sm warn" onClick={submitAppeal}>提交申诉</button>
+          </div>}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function riColor(s) {
   return { out: 'green', returned_ok: 'gray', returned_damaged: 'red', repair: 'orange',
-    lost: 'red', assigned: 'blue', exchanged: 'purple' }[s] || 'gray'
+    lost: 'red', assigned: 'blue', exchanged: 'purple', edge_appraisal: 'orange' }[s] || 'gray'
 }
 function fitBadge(f) {
   if (f === 'ok') return <Badge color="green">✓ 合适合规</Badge>
@@ -170,11 +300,12 @@ function fitBadge(f) {
 }
 function depositLabel(t) {
   return { hold: '冻结押金', deduct_damage: '损坏扣减', deduct_lost: '丢失扣减',
-    deduct_late: '超时扣减', insurance_offset: '保险冲抵返还', refund: '押金退还' }[t] || t
+    deduct_late: '超时扣减', insurance_offset: '保险冲抵返还', refund: '押金退还',
+    hold_appraisal: '鉴定暂扣押金', deduct_reversal: '申诉撤销返还' }[t] || t
 }
 function depositColor(t) {
-  if (t === 'hold') return ''
-  if (t === 'refund' || t === 'insurance_offset') return 'green'
+  if (t === 'hold' || t === 'hold_appraisal') return ''
+  if (t === 'refund' || t === 'insurance_offset' || t === 'deduct_reversal') return 'green'
   return 'red'
 }
 
@@ -295,6 +426,44 @@ function DamageBtn({ rental, onDone }) {
       <p className="small muted">提交后进入损坏处理队列，柜台评定扣减依据；有保险将自动立案，全程可在本单查看。</p>
       <div className="modal-foot"><button className="btn ghost" onClick={() => setOpen(false)}>取消</button>
         <button className="btn danger" onClick={submit}>提交上报</button></div>
+    </Modal>}
+  </>
+}
+
+// 游客自报摔倒（记录课程区域，作为日后板刃鉴定证据）
+function FallBtn({ rental, onDone }) {
+  const [open, setOpen] = useState(false)
+  const [ri, setRI] = useState(rental.items.find(i => i.equipment_type === 'ski' && i.status === 'out')?.id || rental.items[0]?.id)
+  const [area, setArea] = useState(COURSE_AREAS[0])
+  const [desc, setDesc] = useState('')
+  const toast = useToast()
+  const submit = async () => {
+    try {
+      const d = await api('POST', `/rentals/${rental.id}/fall-record`, {
+        rental_item_id: Number(ri) || undefined, course_area: area, description: desc
+      })
+      toast(d.message)
+      setOpen(false); setDesc(''); onDone()
+    } catch (e) { toast(e.message, 'error') }
+  }
+  return <>
+    <button className="btn ghost" onClick={() => setOpen(true)}>🤕 上报摔倒</button>
+    {open && <Modal title="摔倒记录（课程区域将留档）" onClose={() => setOpen(false)}>
+      <Field label="关联雪具（可选）">
+        <select value={ri || ''} onChange={e => setRI(e.target.value)}>
+          <option value="">不指定</option>
+          {rental.items.filter(i => i.status === 'out').map(i =>
+            <option key={i.id} value={i.id}>{TYPE_LABEL[i.equipment_type]} {i.model_label}</option>)}
+        </select>
+      </Field>
+      <Field label="摔倒课程区域">
+        <select value={area} onChange={e => setArea(e.target.value)}>
+          {COURSE_AREAS.map(a => <option key={a}>{a}</option>)}
+        </select>
+      </Field>
+      <Field label="情况描述"><textarea rows={2} value={desc} onChange={e => setDesc(e.target.value)} placeholder="摔倒过程、是否磕碰雪板" /></Field>
+      <div className="modal-foot"><button className="btn ghost" onClick={() => setOpen(false)}>取消</button>
+        <button className="btn" onClick={submit}>提交记录</button></div>
     </Modal>}
   </>
 }

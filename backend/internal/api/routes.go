@@ -33,8 +33,11 @@ func (s *Server) registerRoutes() {
 	s.add("POST", "/api/rentals/{id}/exchange-request", authGuest(s.requestExchange))
 	s.add("POST", "/api/rentals/{id}/extend", authGuest(s.extendRental))
 	s.add("POST", "/api/rentals/{id}/damage", authGuest(s.reportDamage))
+	s.add("POST", "/api/rentals/{id}/fall-record", authGuest(s.guestFallRecord))
 	s.add("POST", "/api/rentals/{id}/queue-return", authGuest(s.queueReturn))
 	s.add("POST", "/api/rentals/{id}/feedback", authGuest(s.submitFeedback))
+	s.add("POST", "/api/appraisals/{id}/statement", authGuest(s.submitStatement))
+	s.add("POST", "/api/appraisals/{id}/appeal", authGuest(s.appealAppraisal))
 
 	// 柜台
 	s.add("GET", "/api/counter/queue", authCounter(s.counterQueue))
@@ -46,14 +49,20 @@ func (s *Server) registerRoutes() {
 	s.add("POST", "/api/counter/damages/{id}/assess", authCounter(s.assessDuringRental))
 	s.add("POST", "/api/counter/returns/{rid}/inspect", authCounter(s.inspectReturnItem))
 	s.add("POST", "/api/counter/returns/{rid}/finish", authCounter(s.finishReturn))
+	s.add("POST", "/api/counter/checkout-photos", authCounter(s.saveCheckoutPhotos))
+	s.add("GET", "/api/counter/edge-appraisals", authCounter(s.counterEdgeAppraisals))
+	s.add("POST", "/api/counter/appraisals/{id}/resolve-appeal", authCounter(s.resolveAppeal))
 
 	// 教练
 	s.add("GET", "/api/coach/courses", authCoach(s.coachCourses))
 	s.add("POST", "/api/coach/fit-check", authCoach(s.fitCheck))
+	s.add("POST", "/api/coach/fall-record", authCoach(s.coachFallRecord))
 
 	// 维修间
 	s.add("GET", "/api/repair/orders", authRepair(s.repairOrders))
 	s.add("POST", "/api/repair/orders/{id}/update", authRepair(s.updateRepairOrder))
+	s.add("GET", "/api/repair/edge-appraisals", authRepair(s.repairEdgeAppraisals))
+	s.add("POST", "/api/repair/appraisals/{id}/confirm", authRepair(s.confirmEdgeAppraisal))
 	s.add("GET", "/api/repair/maintenance", authRepair(s.listMaintenance))
 	s.add("POST", "/api/repair/maintenance/generate", authRepair(s.generateMaintenance))
 	s.add("POST", "/api/repair/maintenance/{id}/resolve", authRepair(s.resolveMaintenance))

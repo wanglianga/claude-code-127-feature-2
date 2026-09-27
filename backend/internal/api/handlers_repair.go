@@ -11,8 +11,11 @@ func (s *Server) repairOrders(w http.ResponseWriter, r *http.Request) {
 		       to_char(ro.created_at,'MM-DD HH24:MI') AS created_at,
 		       to_char(ro.finished_at,'MM-DD HH24:MI') AS finished_at,
 		       i.id AS item_id, i.qr_code, i.serial_no, i.rental_count,
+		       to_char(i.suspended_at,'MM-DD HH24:MI') AS suspended_at,
+		       to_char(i.resumed_at,'MM-DD HH24:MI') AS resumed_at,
+		       EXTRACT(EPOCH FROM (COALESCE(i.resumed_at, ro.finished_at, now()) - i.suspended_at))::bigint AS suspended_seconds,
 		       m.brand, m.name, m.size_label, m.type AS equipment_type,
-		       d.id AS damage_id, d.damage_type, d.severity, d.photos,
+		       d.id AS damage_id, d.damage_type, d.severity, d.photos, d.responsibility,
 		       u.name AS technician_name
 		FROM repair_orders ro
 		JOIN equipment_items i ON i.id=ro.item_id
@@ -65,7 +68,9 @@ func (s *Server) updateRepairOrder(w http.ResponseWriter, r *http.Request) {
 	case "in_progress":
 		tx.Exec(`UPDATE equipment_items SET status='repair' WHERE id=$1`, itemID)
 	case "done":
-		tx.Exec(`UPDATE equipment_items SET status='available' WHERE id=$1`, itemID)
+		// 修复上架：恢复出租，记录暂停出租结束时间
+		tx.Exec(`UPDATE equipment_items SET status='available',
+			resumed_at=now() WHERE id=$1 AND resumed_at IS NULL`, itemID)
 		tx.Exec(`UPDATE rental_items SET status='returned_damaged'
 			WHERE status='repair' AND item_id=$1`, itemID)
 		if damageID > 0 {

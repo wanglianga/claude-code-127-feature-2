@@ -39,7 +39,9 @@ func (s *Server) ledger(w http.ResponseWriter, r *http.Request) {
 		         WHEN 'deduct_lost' THEN '丢失扣减'
 		         WHEN 'deduct_late' THEN '超时扣减'
 		         WHEN 'insurance_offset' THEN '保险冲抵返还'
-		         WHEN 'refund' THEN '押金退还' END AS type_label
+		         WHEN 'deduct_reversal' THEN '申诉撤销返还'
+			         WHEN 'hold_appraisal' THEN '鉴定暂扣押金'
+			         WHEN 'refund' THEN '押金退还' END AS type_label
 		FROM deposit_transactions dt
 		JOIN rentals rr ON rr.id=dt.rental_id
 		JOIN users u ON u.id=rr.guest_id
