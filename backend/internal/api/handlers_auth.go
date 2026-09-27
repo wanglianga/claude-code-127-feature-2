@@ -119,7 +119,9 @@ func (s *Server) listModels(w http.ResponseWriter, r *http.Request) {
 		SELECT m.id, m.code, m.brand, m.name, m.type, m.size_label, m.spec,
 		       m.rental_fee, m.deposit, m.active,
 		       (SELECT count(*) FROM equipment_items i WHERE i.model_id=m.id) AS total,
-		       (SELECT count(*) FROM equipment_items i WHERE i.model_id=m.id AND i.status='available') AS available
+		       (SELECT count(*) FROM equipment_items i WHERE i.model_id=m.id AND i.status='available') AS available,
+		       (SELECT count(*) FROM equipment_items i
+		         WHERE i.model_id=m.id AND i.suspended_at IS NOT NULL AND i.resumed_at IS NULL) AS suspended
 		FROM equipment_models m WHERE m.active
 	`
 	if etype != "" {

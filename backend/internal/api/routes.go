@@ -35,6 +35,7 @@ func (s *Server) registerRoutes() {
 	s.add("POST", "/api/rentals/{id}/damage", authGuest(s.reportDamage))
 	s.add("POST", "/api/rentals/{id}/queue-return", authGuest(s.queueReturn))
 	s.add("POST", "/api/rentals/{id}/feedback", authGuest(s.submitFeedback))
+	s.add("POST", "/api/rentals/{id}/edge-appeal", authGuest(s.appealAssessment))
 
 	// 柜台
 	s.add("GET", "/api/counter/queue", authCounter(s.counterQueue))
@@ -48,8 +49,16 @@ func (s *Server) registerRoutes() {
 	s.add("POST", "/api/counter/returns/{rid}/finish", authCounter(s.finishReturn))
 
 	// 教练
+	s.add("GET", "/api/coach/fall-records", authCoach(s.listFallRecords))
+	s.add("POST", "/api/coach/fall-records", authCoach(s.addFallRecord))
 	s.add("GET", "/api/coach/courses", authCoach(s.coachCourses))
 	s.add("POST", "/api/coach/fit-check", authCoach(s.fitCheck))
+
+	// 维修间：板刃损伤鉴定工作台（维修间确认缺口 → 证据对比 → 确认责任）
+	s.add("GET", "/api/repair/edge-assessments", authRepair(s.listEdgeAssessments))
+	s.add("POST", "/api/repair/edge-assessments", authRepair(s.openEdgeAssessment))
+	s.add("GET", "/api/repair/edge-assessments/{id}", authRepair(s.getEdgeAssessment))
+	s.add("POST", "/api/repair/edge-assessments/{id}/confirm", authRepair(s.confirmEdgeAssessment))
 
 	// 维修间
 	s.add("GET", "/api/repair/orders", authRepair(s.repairOrders))
@@ -57,6 +66,15 @@ func (s *Server) registerRoutes() {
 	s.add("GET", "/api/repair/maintenance", authRepair(s.listMaintenance))
 	s.add("POST", "/api/repair/maintenance/generate", authRepair(s.generateMaintenance))
 	s.add("POST", "/api/repair/maintenance/{id}/resolve", authRepair(s.resolveMaintenance))
+
+	// 板刃鉴定证据：出库照片（柜台拍摄）、摔倒记录（员工可读）
+	s.add("POST", "/api/counter/checkout-photos", authCounter(s.addCheckoutPhoto))
+	s.add("GET", "/api/staff/fall-records", staff(s.listFallRecords))
+
+	// 柜台：板刃鉴定同步查看 + 申诉复核（调课程区域与归还照片）
+	s.add("GET", "/api/counter/edge-assessments", authCounter(s.listEdgeAssessments))
+	s.add("GET", "/api/counter/appeals", authCounter(s.listAppeals))
+	s.add("POST", "/api/counter/appeals/{id}/resolve", authCounter(s.resolveAppeal))
 
 	// 保险
 	s.add("GET", "/api/insurance/claims", authIns(s.listClaims))

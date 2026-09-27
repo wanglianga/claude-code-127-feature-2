@@ -58,3 +58,16 @@ export const DAMAGE_TYPES = Object.entries(DAMAGE_LABEL)
 export const CLAIM_STATUS = {
   filed: '已立案', under_review: '审核中', approved: '已核定待赔付', rejected: '已拒赔', paid: '已赔付'
 }
+
+export const EDGE_STATUS = {
+  open: '待判定', confirmed: '已判责待申诉', appealed: '申诉复核中',
+  upheld: '申诉已驳回（维持）', overturned: '申诉翻案', closed: '已闭环'
+}
+
+export const RESPONSIBILITY = {
+  pending: '待判定', guest_liable: '游客担责', not_liable: '游客无责', disputed: '争议中'
+}
+
+export const APPEAL_STATUS = {
+  submitted: '待复核', reviewing: '复核中', upheld: '维持原判', overturned: '申诉成立'
+}

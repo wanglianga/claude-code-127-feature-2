@@ -2,10 +2,32 @@ package seed
 
 import (
 	"database/sql"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"time"
 
 	"skirental/internal/auth"
+)
+
+// svgPhoto 生成内嵌的演示照片（出库/损伤留档对比用，无需文件系统）
+func svgPhoto(label, bg string) string {
+	svg := fmt.Sprintf(`<svg xmlns="http://www.w3.org/2000/svg" width="320" height="200">
+<rect width="320" height="200" fill="%s"/>
+<rect x="10" y="10" width="300" height="180" fill="none" stroke="#ffffff" stroke-width="3" stroke-dasharray="8 6"/>
+<text x="160" y="95" font-size="20" text-anchor="middle" fill="#ffffff" font-family="sans-serif">%s</text>
+<text x="160" y="130" font-size="13" text-anchor="middle" fill="#e2e8f0" font-family="sans-serif">SKIRENTAL 演示留档</text>
+</svg>`, bg, label)
+	return "data:image/svg+xml;base64," + base64.StdEncoding.EncodeToString([]byte(svg))
+}
+
+var (
+	photoCheckoutOK = svgPhoto("出库留档：板刃完好", "#166534")
+	photoBootOK     = svgPhoto("出库留档：雪鞋完好", "#1d4ed8")
+	photoHelmetOK   = svgPhoto("出库留档：头盔完好", "#7c3aed")
+	photoPoleOK     = svgPhoto("出库留档：雪杖完好", "#0f766e")
+	photoProtOK     = svgPhoto("出库留档：护具完好", "#b45309")
+	photoEdgeNick   = svgPhoto("归还发现：左板刃 3cm 缺口", "#b91c1c")
 )
 
 // Run 写入演示所需的账号、雪具、课程、时段、保险与示例订单。幂等：已初始化则跳过。
@@ -147,14 +169,14 @@ func Run(d *sql.DB) error {
 	tomorrow14 := time.Now().AddDate(0, 0, 1)
 	tomorrow14 = time.Date(tomorrow14.Year(), tomorrow14.Month(), tomorrow14.Day(), 14, 0, 0, 0, time.Local)
 	var dayCourse, nightCourse int64
-	tx.QueryRow(`INSERT INTO courses(name, coach_id, session_type, start_at, end_at, level, capacity, booked_count)
-		VALUES ('初学者日场入门班',$1,'day',$2,$3,'beginner',12,1) RETURNING id`,
+	tx.QueryRow(`INSERT INTO courses(name, coach_id, session_type, start_at, end_at, level, capacity, booked_count, zones)
+		VALUES ('初学者日场入门班',$1,'day',$2,$3,'beginner',12,1,'{"魔毯练习区","初级道A段","教学平台"}') RETURNING id`,
 		coachID, day10, day10.Add(2*time.Hour)).Scan(&dayCourse)
-	tx.QueryRow(`INSERT INTO courses(name, coach_id, session_type, start_at, end_at, level, capacity, booked_count)
-		VALUES ('夜场进阶刻滑班',$1,'night',$2,$3,'intermediate',10,1) RETURNING id`,
+	tx.QueryRow(`INSERT INTO courses(name, coach_id, session_type, start_at, end_at, level, capacity, booked_count, zones)
+		VALUES ('夜场进阶刻滑班',$1,'night',$2,$3,'intermediate',10,1,'{"中级道B段","夜场刻滑区"}') RETURNING id`,
 		coachID, tonight, tonight.Add(2*time.Hour)).Scan(&nightCourse)
-	tx.Exec(`INSERT INTO courses(name, coach_id, session_type, start_at, end_at, level, capacity)
-		VALUES ('明日日场进阶班',$1,'day',$2,$3,'intermediate',12)`,
+	tx.Exec(`INSERT INTO courses(name, coach_id, session_type, start_at, end_at, level, capacity, zones)
+		VALUES ('明日日场进阶班',$1,'day',$2,$3,'intermediate',12,'{"中级道B段","初级道A段上段"}')`,
 		coachID, tomorrow14, tomorrow14.Add(2*time.Hour))
 
 	// ---------- 分时取具槽 ----------
@@ -230,6 +252,46 @@ func Run(d *sql.DB) error {
 	tx.Exec(`INSERT INTO deposit_transactions(rental_id, type, amount, note, created_by)
 		VALUES ($1,'hold',2450,'出库冻结押金',$2)`, rB, g2)
 	assignItems(tx, rB)
+	addCheckoutPhotos(tx, rB, map[string]string{
+		"ski": photoCheckoutOK, "boot": photoBootOK, "helmet": photoHelmetOK, "pole": photoPoleOK,
+	})
+
+	// 李华课中在初级道 A 段摔倒（教练登记，板刃鉴定的课程区域客观依据）
+	var bCourse int64
+	tx.QueryRow(`SELECT course_id FROM rentals WHERE id=$1`, rB).Scan(&bCourse)
+	tx.Exec(`INSERT INTO fall_records(rental_id, course_id, guest_id, zone, severity, description, recorded_by)
+		VALUES ($1,$2,$3,'初级道A段','medium','侧滑失控撞向雪道边缘护栏，起身后继续滑行',$4)`,
+		rB, bCourse, g2, coachID)
+
+	// 维修间在李华归还前巡检发现其雪板左板刃缺口：已建立鉴定、暂停该雪具，
+	// 等待比对出库照片/课程区域/摔倒记录/游客说明后确认责任（鉴定工作台首屏即可处理）
+	var bSkiRI, bSkiItem int64
+	tx.QueryRow(`SELECT ri.id, ri.item_id FROM rental_items ri
+		WHERE ri.rental_id=$1 AND ri.equipment_type='ski'`, rB).Scan(&bSkiRI, &bSkiItem)
+	// 旧板暂停出租；同型号自动换发一件，游客继续上课
+	var bSkiModel int64
+	tx.QueryRow(`SELECT model_id FROM rental_items WHERE id=$1`, bSkiRI).Scan(&bSkiModel)
+	var bNewSki int64
+	tx.QueryRow(`SELECT id FROM equipment_items WHERE model_id=$1 AND status='available'
+		ORDER BY id LIMIT 1 FOR UPDATE`, bSkiModel).Scan(&bNewSki)
+	tx.Exec(`UPDATE equipment_items SET status='out', rental_count=rental_count+1,
+		current_rental_item_id=$1 WHERE id=$2`, bSkiRI, bNewSki)
+	tx.Exec(`UPDATE rental_items SET item_id=$1, exchanged_from_item_id=$2 WHERE id=$3`,
+		bNewSki, bSkiItem, bSkiRI)
+	tx.Exec(`UPDATE equipment_items SET status='repair', current_rental_item_id=NULL,
+		suspended_at=now()-interval '25 minute', suspended_reason='板刃缺口待损伤鉴定'
+		WHERE id=$1`, bSkiItem)
+	tx.Exec(`INSERT INTO edge_assessments
+		(code, rental_id, rental_item_id, item_id, stage, checkout_photos, return_photos,
+		 course_zones, fall_summary, guest_statement, staff_finding, status, responsibility, opened_by)
+		VALUES ('EA-DEMO-B',$1,$2,$3,'during_rental',$4::jsonb,$5::jsonb,
+		 '魔毯练习区、初级道A段、教学平台',
+		 '初级道A段（中等）侧滑失控撞向雪道边缘护栏，起身后继续滑行',
+		 '在初级道 A 段摔了一跤，当时没注意板刃磕到什么，归还时才发现缺口',
+		 '左板刃中段约 3cm 缺口，卷边明显，缺口形态与硬质护栏磕碰一致',
+		 'open','pending',$6)`,
+		rB, bSkiRI, bSkiItem,
+		jsonArray(photoCheckoutOK), jsonArray(photoEdgeNick), coachID)
 
 	// ---------- 示例订单 C：夜场归还中，雪板板刃损伤（维修+保险队列都有数据） ----------
 	var rC int64
@@ -250,19 +312,29 @@ func Run(d *sql.DB) error {
 	tx.Exec(`INSERT INTO deposit_transactions(rental_id, type, amount, note, created_by)
 		VALUES ($1,'hold',2700,'出库冻结押金',$2)`, rC, g3)
 	assignItems(tx, rC)
+	addCheckoutPhotos(tx, rC, map[string]string{
+		"ski": photoCheckoutOK, "boot": photoBootOK, "helmet": photoHelmetOK, "protector": photoProtOK,
+	})
+	// 王芳夜场在刻滑区摔倒一次（与板刃缺口区域吻合，鉴定依据之一）
+	tx.Exec(`INSERT INTO fall_records(rental_id, course_id, guest_id, zone, severity, description, recorded_by)
+		VALUES ($1,$2,$3,'夜场刻滑区','light','刻滑走刃时侧坐摔倒，雪板撞到雪面硬壳',$4)`,
+		rC, nightCourse, g3, coachID)
 
 	// 取第一件（雪板）标记为损坏、其余完好归还
 	var skiRI, skiItem int64
 	tx.QueryRow(`SELECT ri.id, ri.item_id FROM rental_items ri
 		WHERE ri.rental_id=$1 AND ri.equipment_type='ski'`, rC).Scan(&skiRI, &skiItem)
-	tx.Exec(`UPDATE equipment_items SET status='repair' WHERE id=$1`, skiItem)
+	tx.Exec(`UPDATE equipment_items SET status='repair',
+		suspended_at=now()-interval '40 minute', suspended_reason='板刃缺口待磨刃补刃'
+		WHERE id=$1`, skiItem)
 	tx.Exec(`UPDATE rental_items SET status='repair' WHERE id=$1`, skiRI)
 	var dmgID, roID, polID, claimID int64
 	tx.QueryRow(`INSERT INTO damage_reports
 		(rental_item_id, reporter_id, stage, damage_type, severity, description, photos,
 		 status, deduction, assessed_by)
 		VALUES ($1,$2,'at_return','edge_damage','medium','归还时发现左板刃有 3cm 缺口',
-		 '[]'::jsonb,'repair_created',525,$2) RETURNING id`, skiRI, g3).Scan(&dmgID)
+		 $3::jsonb,'repair_created',525,$2) RETURNING id`,
+		skiRI, g3, jsonArray(photoEdgeNick)).Scan(&dmgID)
 	tx.QueryRow(`INSERT INTO repair_orders(item_id, damage_id, issue, advice, status)
 		VALUES ($1,$2,'板刃损伤：左板刃缺口','磨刃/补刃，检测刃口平直度','queued') RETURNING id`,
 		skiItem, dmgID).Scan(&roID)
@@ -363,5 +435,37 @@ func assignItems(tx *sql.Tx, rentalID int64) {
 			itemStatus, v.id, itemID)
 		tx.Exec(`UPDATE rental_items SET item_id=$1, status=$2 WHERE id=$3`,
 			itemID, newStatus, v.id)
+	}
+}
+
+// jsonArray 把照片字符串编码为 JSON 数组
+func jsonArray(photo string) string {
+	b, _ := json.Marshal([]string{photo})
+	return string(b)
+}
+
+// addCheckoutPhotos 为某租赁单已分配的雪具逐件补出库留档照片
+func addCheckoutPhotos(tx *sql.Tx, rentalID int64, byType map[string]string) {
+	rows, err := tx.Query(`SELECT ri.id, ri.item_id, ri.equipment_type
+		FROM rental_items ri WHERE ri.rental_id=$1 AND ri.item_id IS NOT NULL`, rentalID)
+	if err != nil {
+		panic(err)
+	}
+	type x struct {
+		riID, itemID int64
+		etype        string
+	}
+	var xs []x
+	for rows.Next() {
+		var v x
+		rows.Scan(&v.riID, &v.itemID, &v.etype)
+		xs = append(xs, v)
+	}
+	rows.Close()
+	for _, v := range xs {
+		if url, ok := byType[v.etype]; ok {
+			tx.Exec(`INSERT INTO checkout_photos(rental_item_id, item_id, url) VALUES ($1,$2,$3)`,
+				v.riID, v.itemID, url)
+		}
 	}
 }

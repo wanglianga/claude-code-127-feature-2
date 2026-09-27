@@ -440,7 +440,11 @@ SELECT row_to_json(x) FROM (
 			'fit_status', ri.fit_status, 'fit_note', ri.fit_note,
 			'model_id', ri.model_id, 'model_label', m.brand||' '||m.name||' '||m.size_label,
 			'item_id', ri.item_id, 'qr_code', ei.qr_code, 'serial_no', ei.serial_no,
-			'item_status', ei.status
+			'item_status', ei.status,
+			'suspended', ei.suspended_at IS NOT NULL AND ei.resumed_at IS NULL,
+			'suspended_reason', ei.suspended_reason,
+			'suspended_at', to_char(ei.suspended_at,'MM-DD HH24:MI'),
+			'resumed_at', to_char(ei.resumed_at,'MM-DD HH24:MI')
 		  ) ORDER BY ri.id)
 		 FROM rental_items ri
 		 LEFT JOIN equipment_models m ON m.id=ri.model_id
@@ -473,7 +477,28 @@ SELECT row_to_json(x) FROM (
 		 WHERE ip.rental_id=r.id LIMIT 1) AS insurance_name,
 		(SELECT json_agg(json_build_object('id', sr.id, 'message', sr.message,
 			'created_at', to_char(sr.created_at,'MM-DD HH24:MI'), 'read', sr.read_at IS NOT NULL)
-		  ORDER BY sr.id DESC) FROM safety_reminders sr WHERE sr.rental_id=r.id) AS safety_reminders
+		  ORDER BY sr.id DESC) FROM safety_reminders sr WHERE sr.rental_id=r.id) AS safety_reminders,
+		(SELECT json_agg(json_build_object(
+			'id', ea.id, 'code', ea.code, 'stage', ea.stage, 'status', ea.status,
+			'responsibility', ea.responsibility, 'severity', ea.severity,
+			'deduction', ea.deduction, 'conclusion', ea.conclusion,
+			'staff_finding', ea.staff_finding, 'guest_statement', ea.guest_statement,
+			'course_zones', ea.course_zones, 'fall_summary', ea.fall_summary,
+			'checkout_photos', ea.checkout_photos, 'return_photos', ea.return_photos,
+			'qr_code', ei2.qr_code, 'model_label', m2.brand||' '||m2.name||' '||m2.size_label,
+			'created_at', to_char(ea.created_at,'MM-DD HH24:MI'),
+			'confirmed_at', to_char(ea.confirmed_at,'MM-DD HH24:MI'),
+			'repair_order_id', ea.repair_order_id, 'claim_id', ea.claim_id,
+			'appeals', (SELECT json_agg(json_build_object(
+			    'id', ap.id, 'reason', ap.reason, 'evidence_note', ap.evidence_note,
+			    'status', ap.status, 'counter_note', ap.counter_note,
+			    'created_at', to_char(ap.created_at,'MM-DD HH24:MI'))
+			    ORDER BY ap.id DESC) FROM assessment_appeals ap WHERE ap.assessment_id=ea.id)
+		  ) ORDER BY ea.id DESC)
+		 FROM edge_assessments ea
+		 JOIN equipment_items ei2 ON ei2.id=ea.item_id
+		 JOIN equipment_models m2 ON m2.id=ei2.model_id
+		 WHERE ea.rental_id=r.id) AS edge_assessments
 	FROM rentals r JOIN users u ON u.id=r.guest_id
 	LEFT JOIN courses co ON co.id=r.course_id
 	WHERE r.id=$1

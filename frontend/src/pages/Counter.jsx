@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react'
-import { api, yuan, TYPE_LABEL, DAMAGE_TYPES, uploadPhoto } from '../api.js'
+import { api, yuan, TYPE_LABEL, DAMAGE_TYPES, uploadPhoto, EDGE_STATUS, RESPONSIBILITY, APPEAL_STATUS } from '../api.js'
 import { Badge, Modal, Field, Loading, Empty, useToast } from '../components/ui.jsx'
 import RentalDetail from '../components/RentalDetail.jsx'
 
@@ -7,6 +7,7 @@ export default function CounterPage({ page, go }) {
   if (page === 'checkout') return <Checkout />
   if (page === 'exchanges') return <Exchanges />
   if (page === 'returns') return <Returns />
+  if (page === 'appeals') return <Appeals />
   return <QueueBoard />
 }
 
@@ -389,5 +390,148 @@ function ReturnInspect({ rental, onBack, onChanged }) {
         </div>
       </Modal>}
     </div>
+  )
+}
+
+// ---------- 板刃鉴定同步查看 + 申诉复核 ----------
+
+function Appeals() {
+  const [tab, setTab] = useState('appeals')
+  const [appeals, setAppeals] = useState(null)
+  const [edges, setEdges] = useState(null)
+  const [target, setTarget] = useState(null)
+  const toast = useToast()
+  const load = useCallback(async () => {
+    setAppeals(await api('GET', '/counter/appeals'))
+    setEdges(await api('GET', '/counter/edge-assessments'))
+  }, [])
+  useEffect(() => { load() }, [])
+
+  if (!appeals || !edges) return <Loading />
+
+  const pending = appeals.filter(a => a.status === 'submitted' || a.status === 'reviewing')
+
+  return (
+    <div>
+      <div className="btn-row">
+        <h2 style={{ margin: 0, fontSize: 18 }}>板刃损伤鉴定 · 申诉复核</h2>
+        <span className="spacer" style={{ flex: 1 }} />
+        <div className="seg">
+          <button className={tab === 'appeals' ? 'on' : ''} onClick={() => setTab('appeals')}>游客申诉（{pending.length}）</button>
+          <button className={tab === 'edges' ? 'on' : ''} onClick={() => setTab('edges')}>鉴定单同步查看</button>
+        </div>
+      </div>
+      <p className="muted small">游客对责任判定有异议时可申诉；复核时可调出<strong>课程区域记录与归还照片</strong>，维持或翻案（翻案自动退回押金扣减、撤回未赔付理赔）。</p>
+
+      {tab === 'appeals' && (
+        pending.length === 0 ? <Empty text="当前没有待处理申诉" /> :
+        <div className="grid grid-2">
+          {pending.map(a => <div className="card" key={a.id}>
+            <div className="btn-row"><b>申诉 #{a.id} · {a.assessment_code}</b>
+              <span className="spacer" style={{ flex: 1 }} />
+              <Badge color="purple">{APPEAL_STATUS[a.status]}</Badge></div>
+            <div style={{ margin: '6px 0' }}>{a.guest_name} {a.guest_phone} · <span className="mono small">{a.rental_code}</span></div>
+            <div className="alert warn small" style={{ margin: '6px 0' }}>
+              <div><b>申诉理由：</b>{a.reason}</div>
+              {a.evidence_note && <div><b>补充说明：</b>{a.evidence_note}</div>}
+            </div>
+            <div className="small muted">原扣减 {yuan(a.deduction)} · {a.created_at}</div>
+            <div className="modal-foot" style={{ paddingRight: 0 }}>
+              <button className="btn sm" onClick={() => setTarget(a)}>调取证据复核</button>
+            </div>
+          </div>)}
+        </div>
+      )}
+
+      {tab === 'edges' && (
+        edges.length === 0 ? <Empty text="暂无鉴定单" /> :
+        <div className="card" style={{ padding: 0 }}>
+          <div className="table-wrap"><table>
+            <thead><tr><th>鉴定单号</th><th>租赁单</th><th>游客</th><th>雪板</th><th>暂停出租</th><th>责任</th><th>扣减</th><th>状态</th><th></th></tr></thead>
+            <tbody>
+              {edges.map(a => <tr key={a.id}>
+                <td className="mono small">{a.code}</td>
+                <td className="mono small">{a.rental_code}</td>
+                <td>{a.guest_name}</td>
+                <td className="small">{a.brand} {a.size_label} <span className="muted">{a.qr_code}</span></td>
+                <td className="small">{a.suspended_at ? (a.resumed_at ? `▶ ${a.resumed_at}` : '⏸ 暂停中') : '—'}</td>
+                <td><Badge color={a.responsibility === 'guest_liable' ? 'red' : a.responsibility === 'not_liable' ? 'green' : 'gray'}>{RESPONSIBILITY[a.responsibility]}</Badge></td>
+                <td className={a.deduction > 0 ? 'danger-text' : ''}>{yuan(a.deduction)}</td>
+                <td><Badge color={{ open: 'orange', confirmed: 'red', appealed: 'purple', upheld: 'gray', overturned: 'green', closed: 'green' }[a.status]}>{EDGE_STATUS[a.status]}</Badge></td>
+                <td><button className="btn sm ghost" onClick={() => setTargetFromEdge(edges, a, setTarget)}>证据/详情</button></td>
+              </tr>)}
+            </tbody>
+          </table></div>
+        </div>
+      )}
+
+      {target && <AppealReview target={target} onClose={() => { setTarget(null); load() }} />}
+    </div>
+  )
+}
+
+function setTargetFromEdge(edges, a, setTarget) {
+  // 从鉴定单行打开详情：伪造为申诉对象结构以复用弹窗（无申诉时只展示证据）
+  setTarget({
+    assessment_id: a.id, assessment_code: a.code, rental_code: a.rental_code,
+    guest_name: a.guest_name, guest_phone: a.guest_phone, deduction: a.deduction,
+    status: a.appeals?.[0]?.status || '', reason: a.appeals?.[0]?.reason || '',
+    evidence_note: a.appeals?.[0]?.evidence_note || '',
+    checkout_photos: a.checkout_photos, return_photos: a.return_photos,
+    course_zones: a.course_zones, fall_summary: a.fall_summary,
+    guest_statement: a.guest_statement, staff_finding: a.staff_finding,
+    conclusion: a.conclusion, assessment_status: a.status,
+    appeal_id: a.appeals?.find?.(x => x.status === 'submitted')?.id || 0,
+  })
+}
+
+function AppealReview({ target, onClose }) {
+  const toast = useToast()
+  const [note, setNote] = useState('')
+  const [busy, setBusy] = useState(false)
+  const resolve = async (decision) => {
+    if (!target.appeal_id) { toast('该鉴定单没有待处理申诉'); return }
+    setBus(true)
+    try {
+      const d = await api('POST', `/counter/appeals/${target.appeal_id}/resolve`, { decision, note })
+      toast(d.message); onClose()
+    } catch (e) { toast(e.message, 'error') } finally { setBus(false) }
+  }
+  return (
+    <Modal title={`申诉复核 · ${target.assessment_code}`} onClose={onClose} width={780}>
+      <div className="btn-row" style={{ marginBottom: 8 }}>
+        <Badge color="blue">{target.rental_code} · {target.guest_name}</Badge>
+        <Badge color="red">原扣减 {yuan(target.deduction)}</Badge>
+        <Badge color="purple">鉴定状态：{EDGE_STATUS[target.assessment_status] || target.assessment_status}</Badge>
+      </div>
+      {target.reason && <div className="alert warn small" style={{ marginBottom: 10 }}>
+        <b>游客申诉：</b>{target.reason}{target.evidence_note ? `（${target.evidence_note}）` : ''}
+      </div>}
+      <div className="grid grid-2">
+        <div>
+          <div className="small muted">出库留档照片</div>
+          {target.checkout_photos?.length ? <div className="photos">{target.checkout_photos.map((p, i) => <img key={i} src={p} alt="" />)}</div> : <span className="small muted">无</span>}
+        </div>
+        <div>
+          <div className="small muted">归还/缺口照片</div>
+          {target.return_photos?.length ? <div className="photos">{target.return_photos.map((p, i) => <img key={i} src={p} alt="" />)}</div> : <span className="small muted">无</span>}
+        </div>
+      </div>
+      <div className="card" style={{ background: '#f8fafc', marginTop: 10 }}>
+        <div className="small"><b>课程滑行区域：</b>{target.course_zones || '自由滑'}</div>
+        <div className="small" style={{ marginTop: 4 }}><b>摔倒记录：</b>{target.fall_summary}</div>
+        <div className="small" style={{ marginTop: 4 }}><b>游客说明：</b>{target.guest_statement || '—'}</div>
+        <div className="small" style={{ marginTop: 4 }}><b>维修间目检：</b>{target.staff_finding || '—'}</div>
+        {target.conclusion && <div className="small" style={{ marginTop: 4 }}><b>鉴定结论：</b>{target.conclusion}</div>}
+      </div>
+      {target.appeal_id ? <>
+        <Field label="柜台复核意见"><textarea rows={2} value={note} onChange={e => setNote(e.target.value)} placeholder="对比课程区域与归还照片后的复核结论" /></Field>
+        <div className="modal-foot">
+          <button className="btn ghost" onClick={onClose}>关闭</button>
+          <button className="btn" disabled={busy} onClick={() => resolve('upheld')}>维持原判（扣减不变）</button>
+          <button className="btn danger" disabled={busy} onClick={() => resolve('overturned')}>申诉翻案（退回扣减）</button>
+        </div>
+      </> : <div className="modal-foot"><button className="btn ghost" onClick={onClose}>关闭</button></div>}
+    </Modal>
   )
 }

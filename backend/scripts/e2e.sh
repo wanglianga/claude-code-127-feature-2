@@ -81,4 +81,15 @@ echo
 echo "### I. 游客反馈"
 api POST /rentals/1/feedback "$G1" '{"rating":4,"text":"换鞋很快，建议多备半码"}'; echo
 echo
+echo "### J. 板刃损伤鉴定（R-DEMO-B：出库照片/课程区域/摔倒记录/游客说明对比 → 判责 → 申诉 → 柜台维持）"
+EA=$(api GET /repair/edge-assessments?status=open "$REPAIR" | python3 -c "import sys,json;d=json.load(sys.stdin);print([a['id'] for a in d if a['code']=='EA-DEMO-B'][0])")
+echo "维修间打开待判定鉴定 #$EA，证据包："
+api GET /repair/edge-assessments/$EA "$REPAIR" | python3 -c "import sys,json;a=json.load(sys.stdin);print('  出库照片',len(a['checkout_photos']),'张 · 课程区域:',a['course_zones']);print('  摔倒记录:',a['fall_summary']);print('  游客说明:',a['guest_statement']);print('  暂停出租起始:',a['suspended_at'])"
+api POST /repair/edge-assessments/$EA/confirm "$REPAIR" '{"responsibility":"guest_liable","severity":"medium","staff_finding":"左板刃中段3cm缺口，卷边"}' | python3 -c "import sys,json;d=json.load(sys.stdin);print('  ',d['message'],'扣减',d['deduction'],'工单',d['repair_order_id'],'理赔',d['claim_id'])"
+api POST /rentals/2/edge-appeal "$G2" '{"assessment_id":'$EA',"reason":"缺口可能是上一位租客留下的","evidence_note":"出库没让我看板刃"}' | python3 -c "import sys,json;print('  ',json.load(sys.stdin)['message'])"
+api GET /counter/appeals "$COUNTER" | python3 -c "import sys,json;d=json.load(sys.stdin);a=[x for x in d if x['assessment_id']==$EA][0];print('  柜台调出证据：归还照片',len(a['return_photos']),'张，课程区域：',a['course_zones'])"
+AP=$(api GET /counter/appeals "$COUNTER" | python3 -c "import sys,json;d=json.load(sys.stdin);print([x['id'] for x in d if x['assessment_id']==$EA and x['status']=='submitted'][0])")
+api POST /counter/appeals/$AP/resolve "$COUNTER" '{"decision":"upheld","note":"出库照片刃口完好且摔倒区域吻合，维持判责"}' | python3 -c "import sys,json;print('  ',json.load(sys.stdin)['message'])"
+api GET /counter/edge-assessments "$COUNTER" | python3 -c "import sys,json;d=json.load(sys.stdin);a=[x for x in d if x['id']==$EA][0];print('  柜台同步查看：鉴定状态',a['status'],'责任',a['responsibility'])"
+echo
 echo "ALL E2E STEPS DONE"

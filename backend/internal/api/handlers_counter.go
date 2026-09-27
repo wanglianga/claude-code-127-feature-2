@@ -684,9 +684,10 @@ func (s *Server) finishReturn(w http.ResponseWriter, r *http.Request) {
 	var deducted float64
 	tx.QueryRow(`SELECT COALESCE(sum(amount),0) FROM deposit_transactions
 		WHERE rental_id=$1 AND type LIKE 'deduct%'`, rid).Scan(&deducted)
+	// 保险赔付冲抵与申诉翻案退回均返还给游客
 	var offsets float64
 	tx.QueryRow(`SELECT COALESCE(sum(amount),0) FROM deposit_transactions
-		WHERE rental_id=$1 AND type='insurance_offset'`, rid).Scan(&offsets)
+		WHERE rental_id=$1 AND type IN ('insurance_offset','appeal_reversal')`, rid).Scan(&offsets)
 	held := depositTotal
 	refund := held - deducted + offsets
 	if refund < 0 {

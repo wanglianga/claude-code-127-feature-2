@@ -1,9 +1,10 @@
 import React, { useEffect, useState } from 'react'
 import { api, TYPE_LABEL } from '../api.js'
-import { Badge, Loading, useToast } from '../components/ui.jsx'
+import { Badge, Modal, Field, Loading, useToast } from '../components/ui.jsx'
 
 export default function CoachPage() {
   const [courses, setCourses] = useState(null)
+  const [fallTarget, setFallTarget] = useState(null)
   const toast = useToast()
   const load = async () => setCourses(await api('GET', '/coach/courses'))
   useEffect(() => { load() }, [])
@@ -30,6 +31,9 @@ export default function CoachPage() {
             <Badge color="cyan">{co.level === 'beginner' ? '初学者' : co.level === 'intermediate' ? '进阶' : '高级'}</Badge>
             <span className="small muted">{co.start_at} ~ {co.end_at}</span>
           </div>
+          <div className="small muted" style={{ marginBottom: 6 }}>
+            🚩 课程滑行区域：{(co.zones || []).join('、') || '未划定'}（摔倒记录将按区域进入板刃损伤鉴定证据包）
+          </div>
           <div className="table-wrap">
             <table>
               <thead><tr><th>游客</th><th>类型</th><th>建议</th><th>实际</th><th>脚码/身高</th><th>确认状态</th><th>操作</th></tr></thead>
@@ -52,6 +56,7 @@ export default function CoachPage() {
                           i.type === 'boot' ? '雪鞋不合脚，建议换半码' : '雪板长度不适合当前水平，建议换板')}>
                           ✗ 不合规
                         </button>
+                        <button className="btn sm ghost" onClick={() => setFallTarget({ rental_id: rr.rental_id, zones: co.zones || [] })}>摔倒登记</button>
                       </div>
                     </td>
                   </tr>
@@ -65,6 +70,49 @@ export default function CoachPage() {
         </div>
       ))}
       {courses.length === 0 && <div className="empty">近期没有安排课程</div>}
+      {fallTarget && <FallRecordModal target={fallTarget} onClose={() => setFallTarget(null)} />}
     </div>
+  )
+}
+
+// 摔倒/碰撞登记：板刃损伤鉴定时作为课程区域客观依据
+function FallRecordModal({ target, onClose }) {
+  const toast = useToast()
+  const [zone, setZone] = useState(target.zones[0] || '')
+  const [customZone, setCustomZone] = useState('')
+  const [severity, setSeverity] = useState('light')
+  const [desc, setDesc] = useState('')
+  const finalZone = zone === '__custom' ? customZone : zone
+  const submit = async () => {
+    try {
+      const d = await api('POST', '/coach/fall-records', {
+        rental_id: target.rental_id, zone: finalZone, severity, description: desc,
+      })
+      toast(d.message); onClose()
+    } catch (e) { toast(e.message, 'error') }
+  }
+  return (
+    <Modal title="摔倒 / 碰撞登记" onClose={onClose}>
+      <p className="small muted">记录将关联课程区域，归还时如发现板刃缺口，会自动进入损伤鉴定的证据包供对比。</p>
+      <Field label="发生区域（课程划定）">
+        <select value={zone} onChange={e => setZone(e.target.value)}>
+          {target.zones.map(z => <option key={z} value={z}>{z}</option>)}
+          <option value="__custom">其他区域（手填）</option>
+        </select>
+      </Field>
+      {zone === '__custom' && <Field label="区域名称"><input value={customZone} onChange={e => setCustomZone(e.target.value)} placeholder="如：索道下站平台" /></Field>}
+      <Field label="程度">
+        <select value={severity} onChange={e => setSeverity(e.target.value)}>
+          <option value="light">轻微（未碰撞硬物）</option>
+          <option value="medium">中等（撞到护栏/雪道边缘）</option>
+          <option value="heavy">较重（高速碰撞/失控冲出雪道）</option>
+        </select>
+      </Field>
+      <Field label="经过描述"><textarea rows={3} value={desc} onChange={e => setDesc(e.target.value)} placeholder="摔倒动作、碰撞物、雪具是否磕碰等" /></Field>
+      <div className="modal-foot">
+        <button className="btn ghost" onClick={onClose}>取消</button>
+        <button className="btn" onClick={submit}>登记</button>
+      </div>
+    </Modal>
   )
 }

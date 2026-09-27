@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react'
-import { api, yuan, TYPE_LABEL, RENTAL_STATUS, ITEM_STATUS, DAMAGE_TYPES, uploadPhoto } from '../api.js'
+import { api, yuan, TYPE_LABEL, RENTAL_STATUS, ITEM_STATUS, DAMAGE_TYPES, uploadPhoto, EDGE_STATUS, RESPONSIBILITY, APPEAL_STATUS } from '../api.js'
 import { Badge, Modal, Field, useToast, Empty, Loading } from './ui.jsx'
 
 function statusBadge(s) {
@@ -67,13 +67,21 @@ export default function RentalDetail({ id, onClose, onChanged, asGuest, canAsses
                   {i.qr_code && <div className="small mono muted">{i.qr_code}</div>}
                 </td>
                 <td className="small">{yuan(i.fee)} / {yuan(i.deposit)}</td>
-                <td><Badge color={riColor(i.status)}>{ITEM_STATUS[i.status] || i.status}</Badge></td>
+                <td>
+                  <Badge color={riColor(i.status)}>{ITEM_STATUS[i.status] || i.status}</Badge>
+                  {i.suspended && <div style={{ marginTop: 4 }}><Badge color="orange">⏸ 暂停出租中（{i.suspended_at} 起）</Badge></div>}
+                </td>
                 <td>{fitBadge(i.fit_status)}{i.fit_note && <div className="small muted">{i.fit_note}</div>}</td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+
+      {/* 柜台补拍出库留档照片（鉴定对比基准） */}
+      {canAssessDamage && r.items.some(i => ['assigned', 'out'].includes(i.status)) && (
+        <CheckoutPhotoLine rental={r} onDone={load} />
+      )}
 
       {/* 游客操作区 */}
       {asGuest && (
@@ -136,6 +144,14 @@ export default function RentalDetail({ id, onClose, onChanged, asGuest, canAsses
         </>
       )}
 
+      {/* 板刃损伤鉴定依据（四源证据对比 + 责任判定 + 申诉） */}
+      {r.edge_assessments?.length > 0 && (
+        <>
+          <h4>板刃损伤鉴定（出库照片 / 课程区域 / 摔倒记录 / 游客说明）</h4>
+          {r.edge_assessments.map(ea => <EdgeAssessmentBlock key={ea.id} ea={ea} rental={r} asGuest={asGuest} onChanged={load} />)}
+        </>
+      )}
+
       {/* 押金流水 */}
       {r.deposit_logs?.length > 0 && (
         <>
@@ -170,7 +186,8 @@ function fitBadge(f) {
 }
 function depositLabel(t) {
   return { hold: '冻结押金', deduct_damage: '损坏扣减', deduct_lost: '丢失扣减',
-    deduct_late: '超时扣减', insurance_offset: '保险冲抵返还', refund: '押金退还' }[t] || t
+    deduct_late: '超时扣减', insurance_offset: '保险冲抵返还',
+    appeal_reversal: '申诉翻案退回', refund: '押金退还' }[t] || t
 }
 function depositColor(t) {
   if (t === 'hold') return ''
@@ -352,3 +369,97 @@ function FeedbackBtn({ rental, onDone }) {
 }
 
 export { statusBadge }
+
+// 柜台为已预留/已出库雪具补拍出库留档照片（板刃鉴定的对比基准）
+function CheckoutPhotoLine({ rental, onDone }) {
+  const toast = useToast()
+  const outItems = rental.items.filter(i => ['assigned', 'out'].includes(i.status))
+  const [ri, setRI] = useState(outItems[0]?.id)
+  const onFile = async (file) => {
+    try {
+      const url = await uploadPhoto(file)
+      const d = await api('POST', '/counter/checkout-photos', { rental_item_id: Number(ri), url })
+      toast(d.message); onDone()
+    } catch (e) { toast(e.message, 'error') }
+  }
+  return (
+    <div className="inline" style={{ marginTop: 8, gap: 8 }}>
+      <b className="small">出库留档照片：</b>
+      <select value={ri} onChange={e => setRI(e.target.value)} style={{ width: 'auto' }}>
+        {outItems.map(i => <option key={i.id} value={i.id}>{TYPE_LABEL[i.equipment_type]} {i.model_label}（{i.qr_code}）</option>)}
+      </select>
+      <input type="file" accept="image/*" onChange={e => e.target.files[0] && onFile(e.target.files[0])} />
+      <span className="small muted">补拍后自动进入该雪具的板刃鉴定证据包</span>
+    </div>
+  )
+}
+
+function EdgeAssessmentBlock({ ea, rental, asGuest, onChanged }) {  const toast = useToast()
+  const [open, setOpen] = useState(false)
+  const [reason, setReason] = useState('')
+  const [note, setNote] = useState('')
+  const hasOpenAppeal = (ea.appeals || []).some(a => a.status === 'submitted' || a.status === 'reviewing')
+  const latestAppeal = ea.appeals?.[0]
+  const submit = async () => {
+    try {
+      const d = await api('POST', `/rentals/${rental.id}/edge-appeal`, {
+        assessment_id: ea.id, reason, evidence_note: note,
+      })
+      toast(d.message); setOpen(false); onChanged()
+    } catch (e) { toast(e.message, 'error') }
+  }
+  const color = { open: 'orange', confirmed: 'red', appealed: 'purple', upheld: 'gray', overturned: 'green', closed: 'green' }[ea.status]
+  return (
+    <div className="alert red">
+      <div className="btn-row" style={{ justifyContent: 'space-between' }}>
+        <b>🔍 {ea.code} · {ea.model_label}（{ea.qr_code}）</b>
+        <span className="inline">
+          <Badge color={color}>{EDGE_STATUS[ea.status] || ea.status}</Badge>
+          {ea.responsibility !== 'pending' &&
+            <Badge color={ea.responsibility === 'guest_liable' ? 'red' : 'green'}>{RESPONSIBILITY[ea.responsibility]}</Badge>}
+        </span>
+      </div>
+      <div className="grid grid-2" style={{ marginTop: 6 }}>
+        <div className="small">
+          <b>① 出库照片</b>{ea.checkout_photos?.length ? `（${ea.checkout_photos.length} 张，刃口完好基准）` : '：无留档'}
+          {ea.checkout_photos?.length > 0 && <div className="photos">{ea.checkout_photos.map((p, i) => <img key={i} src={p} alt="" />)}</div>}
+        </div>
+        <div className="small">
+          <b>② 归还/缺口照片</b>{ea.return_photos?.length ? `（${ea.return_photos.length} 张）` : '：无'}
+          {ea.return_photos?.length > 0 && <div className="photos">{ea.return_photos.map((p, i) => <img key={i} src={p} alt="" />)}</div>}
+        </div>
+      </div>
+      <div className="small" style={{ marginTop: 6 }}><b>③ 课程区域：</b>{ea.course_zones || '自由滑（未关联课程）'}</div>
+      <div className="small"><b>④ 摔倒记录：</b>{ea.fall_summary}</div>
+      <div className="small"><b>游客说明：</b>{ea.guest_statement || '—'}</div>
+      <div className="small"><b>维修间目检：</b>{ea.staff_finding || '—'}</div>
+      {ea.conclusion && <div className="small" style={{ marginTop: 4 }}><b>鉴定结论：</b>{ea.conclusion}</div>}
+      <div className="small" style={{ marginTop: 4 }}>
+        {ea.deduction > 0 && <>建议扣减 <b className="danger-text">{yuan(ea.deduction)}</b> · </>}
+        {ea.repair_order_id > 0 && <>维修工单 #{ea.repair_order_id} · </>}
+        {ea.claim_id > 0 && <>保险理赔 #{ea.claim_id}</>}
+        {ea.deduction === 0 && ea.repair_order_id > 0 && '维修费用由平台承担'}
+      </div>
+      {latestAppeal && <div className="alert warn small" style={{ marginTop: 6 }}>
+        <b>申诉记录：</b>{latestAppeal.reason}
+        {latestAppeal.evidence_note ? `（${latestAppeal.evidence_note}）` : ''}
+        <div>状态：<b>{APPEAL_STATUS[latestAppeal.status] || latestAppeal.status}</b>{latestAppeal.counter_note ? ` · 柜台：${latestAppeal.counter_note}` : ''}</div>
+      </div>}
+      {asGuest && ea.status === 'confirmed' && ea.responsibility === 'guest_liable' && !hasOpenAppeal && (
+        <div style={{ marginTop: 8 }}>
+          <button className="btn sm warn" onClick={() => setOpen(v => !v)}>对责任判定提出申诉</button>
+          {open && <div className="card" style={{ marginTop: 8 }}>
+            <Field label="申诉理由（必填）">
+              <textarea rows={2} value={reason} onChange={e => setReason(e.target.value)} placeholder="如：出库时板刃已有旧伤、摔倒区域与缺口不符…" />
+            </Field>
+            <Field label="补充说明/证据线索"><textarea rows={2} value={note} onChange={e => setNote(e.target.value)} placeholder="柜台将调出课程区域记录与归还照片复核" /></Field>
+            <div className="modal-foot" style={{ paddingRight: 0 }}>
+              <button className="btn sm ghost" onClick={() => setOpen(false)}>取消</button>
+              <button className="btn sm warn" disabled={!reason.trim()} onClick={submit}>提交申诉</button>
+            </div>
+          </div>}
+        </div>
+      )}
+    </div>
+  )
+}

@@ -11,7 +11,7 @@ import (
 func (s *Server) coachCourses(w http.ResponseWriter, r *http.Request) {
 	c := currentUser(r)
 	s.listJSON(w, `SELECT COALESCE(json_agg(t ORDER BY t.start_at), '[]') FROM (
-		SELECT co.id, co.name, co.session_type,
+		SELECT co.id, co.name, co.session_type, co.zones,
 			to_char(co.start_at,'YYYY-MM-DD HH24:MI') AS start_at,
 			to_char(co.end_at,'HH24:MI') AS end_at, co.level, co.booked_count, co.capacity,
 			(SELECT json_agg(json_build_object(

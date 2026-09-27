@@ -157,13 +157,14 @@ function Catalog() {
       {tab === 'model' ? <ModelForm onDone={load} /> : <ItemForm models={models} onDone={load} toast={toast} />}
       {!models ? <Loading /> : <div className="card" style={{ padding: 0, marginTop: 16 }}>
         <div className="table-wrap"><table>
-          <thead><tr><th>编码</th><th>类型</th><th>品牌/名称</th><th>尺码</th><th>租金</th><th>押金</th><th>库存/可用</th></tr></thead>
+          <thead><tr><th>编码</th><th>类型</th><th>品牌/名称</th><th>尺码</th><th>租金</th><th>押金</th><th>库存/可用</th><th>暂停出租</th></tr></thead>
           <tbody>
             {models.map(m => <tr key={m.id}>
               <td className="mono small">{m.code}</td><td>{TYPE_LABEL[m.type]}</td>
               <td>{m.brand} {m.name}</td><td><b>{m.size_label}</b></td>
               <td>{yuan(m.rental_fee)}</td><td>{yuan(m.deposit)}</td>
               <td>{m.total} / <span className={m.available > 0 ? 'ok-text' : 'danger-text'}>{m.available}</span></td>
+              <td>{m.suspended > 0 ? <Badge color="orange">⏸ {m.suspended} 件（不参与推荐）</Badge> : <span className="muted">—</span>}</td>
             </tr>)}
           </tbody>
         </table></div>
